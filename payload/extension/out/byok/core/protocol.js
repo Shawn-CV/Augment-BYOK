@@ -2,7 +2,6 @@
 
 const { normalizeString, randomId } = require("../infra/util");
 const { ensureModelRegistryFeatureFlags } = require("./model-registry");
-const { buildChatPrompt } = require("../prompts/chat");
 const { buildPromptEnhancerPrompt } = require("../prompts/prompt-enhancer");
 const { buildCompletionPrompt } = require("../prompts/completion");
 const { buildChatInputCompletionPrompt } = require("../prompts/chat-input-completion");
@@ -12,6 +11,13 @@ const { buildSmartPasteStreamPrompt } = require("../prompts/smart-paste-stream")
 const { buildCommitMessageStreamPrompt } = require("../prompts/commit-message-stream");
 const { buildConversationTitlePrompt } = require("../prompts/conversation-title");
 const { buildNextEditStreamPrompt } = require("../prompts/next-edit-stream");
+
+function buildFallbackChatPrompt(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const message = typeof b.message === "string" ? b.message : typeof b.prompt === "string" ? b.prompt : typeof b.instruction === "string" ? b.instruction : "";
+  const user = message.trim() ? message : "Hello";
+  return { system: "", messages: [{ role: "user", content: user }] };
+}
 
 function buildMessagesForEndpoint(endpoint, body) {
   const ep = normalizeString(endpoint);
@@ -24,7 +30,7 @@ function buildMessagesForEndpoint(endpoint, body) {
   if (ep === "/generate-conversation-title") return buildConversationTitlePrompt(body);
   if (ep === "/next-edit-stream") return buildNextEditStreamPrompt(body);
   if (ep === "/prompt-enhancer") return buildPromptEnhancerPrompt(body);
-  return buildChatPrompt(ep, body);
+  return buildFallbackChatPrompt(body);
 }
 
 function coerceText(text) {
@@ -46,10 +52,15 @@ function makeBackChatResult(text, { nodes, includeNodes = true } = {}) {
   return out;
 }
 
-function makeBackCompletionResult(text, { timeoutMs } = {}) {
-  const out = makeBackTextResult(text);
-  if (Number.isFinite(Number(timeoutMs))) out.completion_timeout_ms = Number(timeoutMs);
-  return out;
+function makeBackCompletionResult(text, { timeoutMs, suggestedPrefixCharCount, suggestedSuffixCharCount } = {}) {
+  return {
+    completion_items: [{ text: coerceText(text), suffix_replacement_text: "", skipped_suffix: "" }],
+    unknown_blob_names: [],
+    checkpoint_not_found: false,
+    suggested_prefix_char_count: Number.isFinite(Number(suggestedPrefixCharCount)) ? Number(suggestedPrefixCharCount) : 0,
+    suggested_suffix_char_count: Number.isFinite(Number(suggestedSuffixCharCount)) ? Number(suggestedSuffixCharCount) : 0,
+    completion_timeout_ms: Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 0
+  };
 }
 
 function makeBackNextEditGenerationChunk({ path, blobName, charStart, charEnd, existingCode, suggestedCode }) {

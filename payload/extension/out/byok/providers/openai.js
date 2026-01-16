@@ -23,6 +23,7 @@ function buildOpenAiRequest({ baseUrl, apiKey, model, messages, extraHeaders, re
   if (!Array.isArray(messages) || !messages.length) throw new Error("OpenAI messages 为空");
   const body = { ...(requestDefaults && typeof requestDefaults === "object" ? requestDefaults : null), model: m, messages, stream: Boolean(stream) };
   const headers = withJsonContentType(openAiAuthHeaders(key, extraHeaders));
+  if (stream) headers.accept = "text/event-stream";
   return { url, headers, body };
 }
 
@@ -58,16 +59,27 @@ async function* openAiStreamTextDeltas({ baseUrl, apiKey, model, messages, timeo
   );
 
   if (!resp.ok) throw new Error(`OpenAI(stream) ${resp.status}: ${await readTextLimit(resp, 500)}`.trim());
+  const contentType = normalizeString(resp.headers?.get?.("content-type")).toLowerCase();
+  if (!contentType.includes("text/event-stream")) {
+    const preview = await readTextLimit(resp, 500);
+    throw new Error(`OpenAI(stream) 响应不是 SSE（content-type=${contentType || "unknown"}）；请确认 baseUrl 指向 OpenAI /chat/completions；body: ${preview}`.trim());
+  }
+  let dataEvents = 0;
+  let parsedChunks = 0;
+  let emitted = 0;
   for await (const ev of parseSse(resp)) {
     const data = normalizeString(ev?.data);
     if (!data) continue;
+    dataEvents += 1;
     if (data === "[DONE]") break;
     let json;
     try { json = JSON.parse(data); } catch { continue; }
+    parsedChunks += 1;
     const delta = json?.choices?.[0]?.delta;
     const text = typeof delta?.content === "string" ? delta.content : "";
-    if (text) yield text;
+    if (text) { emitted += 1; yield text; }
   }
+  if (emitted === 0) throw new Error(`OpenAI(stream) 未解析到任何 SSE delta（data_events=${dataEvents}, parsed_chunks=${parsedChunks}）；请检查 baseUrl 是否为 OpenAI SSE`.trim());
 }
 
 function normalizeToolCallIndex(v) {
@@ -92,6 +104,7 @@ function buildOpenAiChatStreamRequest({ baseUrl, apiKey, model, messages, tools,
     body.tool_choice = "auto";
   }
   const headers = withJsonContentType(openAiAuthHeaders(key, extraHeaders));
+  headers.accept = "text/event-stream";
   return { url, headers, body };
 }
 
@@ -99,6 +112,11 @@ async function* openAiChatStreamChunks({ baseUrl, apiKey, model, messages, tools
   const { url, headers, body } = buildOpenAiChatStreamRequest({ baseUrl, apiKey, model, messages, tools, extraHeaders, requestDefaults });
   const resp = await safeFetch(url, { method: "POST", headers, body: JSON.stringify(body) }, { timeoutMs, abortSignal, label: "OpenAI(chat-stream)" });
   if (!resp.ok) throw new Error(`OpenAI(chat-stream) ${resp.status}: ${await readTextLimit(resp, 500)}`.trim());
+  const contentType = normalizeString(resp.headers?.get?.("content-type")).toLowerCase();
+  if (!contentType.includes("text/event-stream")) {
+    const preview = await readTextLimit(resp, 500);
+    throw new Error(`OpenAI(chat-stream) 响应不是 SSE（content-type=${contentType || "unknown"}）；请确认 baseUrl 指向 OpenAI /chat/completions SSE；body: ${preview}`.trim());
+  }
 
   const metaMap = toolMetaByName instanceof Map ? toolMetaByName : new Map();
   const getToolMeta = (toolName) => metaMap.get(toolName) || {};
@@ -111,10 +129,14 @@ async function* openAiChatStreamChunks({ baseUrl, apiKey, model, messages, tools
   let stopReasonSeen = false;
   let usagePromptTokens = null;
   let usageCompletionTokens = null;
+  let dataEvents = 0;
+  let parsedChunks = 0;
+  let emittedChunks = 0;
 
   for await (const ev of parseSse(resp)) {
     const data = normalizeString(ev?.data);
     if (!data) continue;
+    dataEvents += 1;
     if (data === "[DONE]") break;
     let json;
     try {
@@ -122,6 +144,7 @@ async function* openAiChatStreamChunks({ baseUrl, apiKey, model, messages, tools
     } catch {
       continue;
     }
+    parsedChunks += 1;
 
     const u = json && typeof json === "object" && json.usage && typeof json.usage === "object" ? json.usage : null;
     if (u) {
@@ -138,6 +161,7 @@ async function* openAiChatStreamChunks({ baseUrl, apiKey, model, messages, tools
       if (text) {
         fullText += text;
         nodeId += 1;
+        emittedChunks += 1;
         yield makeBackChatChunk({ text, nodes: [rawResponseNode({ id: nodeId, content: text })] });
       }
 
@@ -167,6 +191,11 @@ async function* openAiChatStreamChunks({ baseUrl, apiKey, model, messages, tools
   }
 
   const ordered = Array.from(toolCallsByIndex.entries()).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+  const hasUsage = usagePromptTokens != null || usageCompletionTokens != null;
+  const hasToolCalls = ordered.some((tc) => normalizeString(tc?.name));
+  if (emittedChunks === 0 && !hasUsage && !hasToolCalls) {
+    throw new Error(`OpenAI(chat-stream) 未解析到任何上游 SSE 内容（data_events=${dataEvents}, parsed_chunks=${parsedChunks}）；请检查 baseUrl 是否为 OpenAI /chat/completions SSE`);
+  }
   for (let i = 0; i < ordered.length; i++) {
     const tc = ordered[i];
     const toolName = normalizeString(tc?.name);
@@ -183,7 +212,7 @@ async function* openAiChatStreamChunks({ baseUrl, apiKey, model, messages, tools
     nodeId += 1;
     yield makeBackChatChunk({ text: "", nodes: [toolUseNode({ id: nodeId, toolUseId, toolName, inputJson, mcpServerName: meta.mcpServerName, mcpToolName: meta.mcpToolName })] });
   }
-  if (Number.isFinite(Number(usagePromptTokens)) || Number.isFinite(Number(usageCompletionTokens))) {
+  if (hasUsage) {
     nodeId += 1;
     yield makeBackChatChunk({ text: "", nodes: [tokenUsageNode({ id: nodeId, inputTokens: usagePromptTokens, outputTokens: usageCompletionTokens })] });
   }

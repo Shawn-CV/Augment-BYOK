@@ -1,28 +1,20 @@
 "use strict";
 
 const { normalizeString } = require("../infra/util");
-const { RESPONSE_NODE_RAW_RESPONSE, RESPONSE_NODE_MAIN_TEXT_FINISHED, RESPONSE_NODE_TOOL_USE, RESPONSE_NODE_TOOL_USE_START } = require("./augment-protocol");
+const { RESPONSE_NODE_RAW_RESPONSE, RESPONSE_NODE_MAIN_TEXT_FINISHED, RESPONSE_NODE_TOOL_USE, RESPONSE_NODE_TOOL_USE_START, IMAGE_FORMAT_JPEG, IMAGE_FORMAT_GIF, IMAGE_FORMAT_WEBP } = require("./augment-protocol");
 const { compactAugmentChatHistory } = require("./augment-history-summary");
-
-function asRecord(v) {
-  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
-}
-
-function asArray(v) {
-  return Array.isArray(v) ? v : [];
-}
-
-function asString(v) {
-  if (typeof v === "string") return v;
-  if (v == null) return "";
-  return String(v);
-}
-
-function pick(obj, keys) {
-  const o = asRecord(obj);
-  for (const k of keys) if (Object.prototype.hasOwnProperty.call(o, k)) return o[k];
-  return undefined;
-}
+const { asRecord, asArray, asString, pick, normalizeNodeType } = require("./augment-struct");
+const {
+  personaTypeToLabel,
+  formatIdeStateForPrompt,
+  formatEditEventsForPrompt,
+  formatCheckpointRefForPrompt,
+  formatChangePersonalityForPrompt,
+  formatImageIdForPrompt,
+  formatFileIdForPrompt,
+  formatFileNodeForPrompt,
+  formatHistorySummaryForPrompt
+} = require("./augment-node-format");
 
 function isPlaceholderMessage(message) {
   const s = String(message || "").trim();
@@ -34,9 +26,9 @@ function isPlaceholderMessage(message) {
 
 function mapImageFormatToMimeType(format) {
   const f = Number(format);
-  if (f === 2) return "image/jpeg";
-  if (f === 3) return "image/gif";
-  if (f === 4) return "image/webp";
+  if (f === IMAGE_FORMAT_JPEG) return "image/jpeg";
+  if (f === IMAGE_FORMAT_GIF) return "image/gif";
+  if (f === IMAGE_FORMAT_WEBP) return "image/webp";
   return "image/png";
 }
 
@@ -93,13 +85,6 @@ function buildToolMetaByName(toolDefs) {
   return map;
 }
 
-function normalizeNodeType(node) {
-  const r = asRecord(node);
-  const v = pick(r, ["type", "node_type", "nodeType"]);
-  const n = Number(v);
-  return Number.isFinite(n) ? n : -1;
-}
-
 function normalizeChatHistoryItem(raw) {
   const r = asRecord(raw);
   const request_id = asString(pick(r, ["request_id", "requestId", "requestID", "id"]));
@@ -115,7 +100,13 @@ function normalizeChatHistoryItem(raw) {
 
 function normalizeAugmentChatRequest(body) {
   const b = asRecord(body);
-  const message = asString(pick(b, ["message", "prompt", "instruction"]));
+  const rawMessage = asString(pick(b, ["message"]));
+  const rawPrompt = asString(pick(b, ["prompt"]));
+  const rawInstruction = asString(pick(b, ["instruction"]));
+  const useMessage = normalizeString(rawMessage) && !isPlaceholderMessage(rawMessage);
+  const usePrompt = !useMessage && normalizeString(rawPrompt);
+  const message = useMessage ? rawMessage : usePrompt ? rawPrompt : rawInstruction;
+  const message_source = useMessage ? "message" : usePrompt ? "prompt" : normalizeString(rawInstruction) ? "instruction" : "";
   const conversation_id = asString(pick(b, ["conversation_id", "conversationId", "conversationID"]));
   const chat_history = asArray(pick(b, ["chat_history", "chatHistory"])).map(normalizeChatHistoryItem);
   compactAugmentChatHistory(chat_history);
@@ -126,14 +117,19 @@ function normalizeAugmentChatRequest(body) {
   const agent_memories = asString(pick(b, ["agent_memories", "agentMemories"]));
   const mode = asString(pick(b, ["mode"]));
   const prefix = asString(pick(b, ["prefix"]));
+  const selected_code = asString(pick(b, ["selected_code", "selectedCode", "selected_text", "selectedText", "selected_code_snippet", "selectedCodeSnippet"]));
   const suffix = asString(pick(b, ["suffix"]));
+  const diff = asString(pick(b, ["diff"]));
   const lang = asString(pick(b, ["lang", "language"]));
   const path = asString(pick(b, ["path"]));
   const user_guidelines = asString(pick(b, ["user_guidelines", "userGuidelines"]));
   const workspace_guidelines = asString(pick(b, ["workspace_guidelines", "workspaceGuidelines"]));
+  const persona_type = Number(pick(b, ["persona_type", "personaType"]));
+  const silent = Boolean(pick(b, ["silent"]));
+  const canvas_id = asString(pick(b, ["canvas_id", "canvasId"]));
   const rules = pick(b, ["rules"]);
   const feature_detection_flags = asRecord(pick(b, ["feature_detection_flags", "featureDetectionFlags"]));
-  return { message, conversation_id, chat_history, tool_definitions, nodes, structured_request_nodes, request_nodes, agent_memories, mode, prefix, suffix, lang, path, user_guidelines, workspace_guidelines, rules, feature_detection_flags };
+  return { message, message_source, conversation_id, chat_history, tool_definitions, nodes, structured_request_nodes, request_nodes, agent_memories, mode, prefix, selected_code, suffix, diff, lang, path, user_guidelines, workspace_guidelines, persona_type, silent, canvas_id, rules, feature_detection_flags };
 }
 
 function coerceRulesText(rules) {
@@ -141,9 +137,29 @@ function coerceRulesText(rules) {
   return normalizeString(rules);
 }
 
+function buildInlineCodeContextText(req) {
+  const prefix = typeof req?.prefix === "string" ? req.prefix : "";
+  const selected = typeof req?.selected_code === "string" ? req.selected_code : "";
+  const suffix = typeof req?.suffix === "string" ? req.suffix : "";
+  return `${prefix}${selected}${suffix}`.trim();
+}
+
+function buildUserExtraTextParts(req, { hasNodes } = {}) {
+  if (hasNodes) return [];
+  if (req && typeof req === "object" && req.message_source === "prompt") return [];
+  const main = typeof req?.message === "string" ? req.message.trim() : "";
+  const out = [];
+  const code = buildInlineCodeContextText(req);
+  if (normalizeString(code) && code.trim() !== main) out.push(code);
+  const diff = typeof req?.diff === "string" ? req.diff.trim() : "";
+  if (normalizeString(diff) && diff !== code && diff !== main) out.push(diff);
+  return out;
+}
+
 function buildSystemPrompt(req) {
   const parts = [];
-  if (normalizeString(req.prefix)) parts.push(req.prefix.trim());
+  const persona = personaTypeToLabel(req && typeof req === "object" ? req.persona_type : 0);
+  if (persona && persona !== "DEFAULT") parts.push(`Persona: ${persona}`);
   if (normalizeString(req.user_guidelines)) parts.push(req.user_guidelines.trim());
   if (normalizeString(req.workspace_guidelines)) parts.push(req.workspace_guidelines.trim());
   const rulesText = coerceRulesText(req.rules);
@@ -152,7 +168,6 @@ function buildSystemPrompt(req) {
   if (normalizeString(req.mode).toUpperCase() === "AGENT") parts.push("You are an AI coding assistant with access to tools. Use tools when needed to complete tasks.");
   if (normalizeString(req.lang)) parts.push(`The user is working with ${req.lang.trim()} code.`);
   if (normalizeString(req.path)) parts.push(`Current file path: ${req.path.trim()}`);
-  if (normalizeString(req.suffix)) parts.push(`Suffix:\n${req.suffix}`.trim());
   return parts.join("\n\n").trim();
 }
 
@@ -197,17 +212,6 @@ function extractToolCallsFromOutputNodes(nodes) {
   return out;
 }
 
-function formatNodeValue(label, value) {
-  const l = normalizeString(label) || "Node";
-  if (value == null) return "";
-  try {
-    const s = JSON.stringify(value);
-    return s && s !== "null" ? `${l}: ${s}` : "";
-  } catch {
-    return "";
-  }
-}
-
 function parseJsonObjectOrEmpty(json) {
   const raw = normalizeString(json) || "{}";
   try {
@@ -232,9 +236,18 @@ module.exports = {
   normalizeNodeType,
   normalizeAugmentChatRequest,
   coerceRulesText,
+  buildInlineCodeContextText,
+  buildUserExtraTextParts,
+  formatIdeStateForPrompt,
+  formatEditEventsForPrompt,
+  formatCheckpointRefForPrompt,
+  formatChangePersonalityForPrompt,
+  formatImageIdForPrompt,
+  formatFileIdForPrompt,
+  formatFileNodeForPrompt,
+  formatHistorySummaryForPrompt,
   buildSystemPrompt,
   extractAssistantTextFromOutputNodes,
   extractToolCallsFromOutputNodes,
-  formatNodeValue,
   parseJsonObjectOrEmpty
 };

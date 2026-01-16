@@ -19,7 +19,7 @@ const LLM_ENDPOINT_SPECS = [
     upstreamBackType: "BackChatResult",
     inputKeys: ["model", "message", "chat_history", "prefix?", "selected_code?", "suffix?", "path?", "lang?", "blobs?", "user_guidelines?", "workspace_guidelines?", "tool_definitions?", "nodes?", "mode?", "persona_type?", "agent_memories?", "external_source_ids?", "user_guided_blobs?", "context_code_exchange_request_id?", "disable_auto_external_sources?", "enable_preference_collection?", "third_party_override? (stripped)"],
     outputKeys: ["text", "unknown_blob_names[]", "checkpoint_not_found", "workspace_file_chunks[].{char_start,char_end,blob_name}", "nodes?", "stop_reason?"],
-    byokImpl: "shim.maybeHandleCallApi(/chat): protocol.buildMessagesForEndpoint -> provider.completeText -> BackChatResult"
+    byokImpl: "shim.maybeHandleCallApi(/chat): normalizeAugmentChatRequest + historySummary -> provider.completeText(buildOpenAiMessages/buildAnthropicMessages) -> BackChatResult"
   },
   {
     endpoint: "/chat-stream",
@@ -43,7 +43,7 @@ const LLM_ENDPOINT_SPECS = [
     upstreamBackType: "BackCompletionResult",
     inputKeys: ["model", "prompt", "suffix?", "path?", "lang?", "blob_name?", "prefix_begin?", "cursor_position?", "suffix_end?", "blobs?", "recency_info?", "probe_only?", "sequence_id?", "filter_threshold?", "edit_events?"],
     outputKeys: ["text (or completion_items)", "unknown_blob_names[]", "checkpoint_not_found", "suggested_prefix_char_count?", "suggested_suffix_char_count?", "completion_timeout_ms?"],
-    byokImpl: "completion prompt -> provider.completeText -> BackCompletionResult(text)"
+    byokImpl: "completion prompt -> provider.completeText -> BackCompletionResult(completion_items[0].text)"
   },
   {
     endpoint: "/chat-input-completion",
@@ -51,7 +51,7 @@ const LLM_ENDPOINT_SPECS = [
     upstreamBackType: "BackCompletionResult",
     inputKeys: ["model", "prompt", "suffix?", "path?", "lang?", "blobs?", "recency_info?", "sequence_id?", "edit_events?"],
     outputKeys: ["text (or completion_items)", "unknown_blob_names[]", "checkpoint_not_found"],
-    byokImpl: "chat-input completion prompt -> provider.completeText"
+    byokImpl: "chat-input completion prompt -> provider.completeText -> BackCompletionResult(completion_items[0].text)"
   },
   {
     endpoint: "/edit",
@@ -66,24 +66,24 @@ const LLM_ENDPOINT_SPECS = [
     kind: "callApiStream",
     upstreamBackType: "BackChatInstructionStreamResult (stream chunks)",
     inputKeys: ["model", "instruction", "prefix?", "selected_text", "suffix?", "path?", "lang?", "blob_name?", "prefix_begin?", "suffix_end?", "blobs?", "chat_history?", "context_code_exchange_request_id?", "user_guidelines?", "workspace_guidelines?"],
-    outputKeys: ["text (delta)", "unknown_blob_names[]", "checkpoint_not_found", "replacement_text?", "replacement_old_text?", "replacement_start_line?", "replacement_end_line?"],
-    byokImpl: "instruction stream -> BackChatInstructionStreamResult(text)"
+    outputKeys: ["text (delta)", "replacement_text?", "replacement_old_text?", "replacement_start_line?", "replacement_end_line?"],
+    byokImpl: "instruction stream -> {text,+replacement meta}"
   },
   {
     endpoint: "/smart-paste-stream",
     kind: "callApiStream",
     upstreamBackType: "BackChatInstructionStreamResult (stream chunks)",
     inputKeys: ["model", "instruction", "prefix?", "selected_text", "suffix?", "path?", "lang?", "blob_name?", "prefix_begin?", "suffix_end?", "blobs?", "chat_history?", "code_block?", "target_file_path?", "target_file_content?", "context_code_exchange_request_id?"],
-    outputKeys: ["text (delta)", "unknown_blob_names[]", "checkpoint_not_found", "replacement_text?", "replacement_old_text?", "replacement_start_line?", "replacement_end_line?"],
-    byokImpl: "smart paste stream -> BackChatInstructionStreamResult(text)"
+    outputKeys: ["text (delta)", "replacement_text?", "replacement_old_text?", "replacement_start_line?", "replacement_end_line?"],
+    byokImpl: "smart paste stream -> {text,+replacement meta}"
   },
   {
     endpoint: "/generate-commit-message-stream",
     kind: "callApiStream",
-    upstreamBackType: "{text} (stream chunks)",
+    upstreamBackType: "BackChatResult (stream chunks)",
     inputKeys: ["diff", "changed_file_stats?", "relevant_commit_messages?", "example_commit_messages?"],
-    outputKeys: ["text (delta/partial)"],
-    byokImpl: "commit msg stream -> {text}"
+    outputKeys: ["text (delta)", "unknown_blob_names[]", "checkpoint_not_found", "workspace_file_chunks[]", "nodes[]"],
+    byokImpl: "commit msg stream -> BackChatResult"
   },
   {
     endpoint: "/generate-conversation-title",

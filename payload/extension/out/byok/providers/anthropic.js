@@ -42,6 +42,7 @@ function buildAnthropicRequest({ baseUrl, apiKey, model, system, messages, tools
     body.tool_choice = { type: "auto" };
   }
   const headers = withJsonContentType(anthropicAuthHeaders(key, extraHeaders));
+  if (stream) headers.accept = "text/event-stream";
   return { url, headers, body };
 }
 
@@ -80,17 +81,28 @@ async function* anthropicStreamTextDeltas({ baseUrl, apiKey, model, system, mess
   );
 
   if (!resp.ok) throw new Error(`Anthropic(stream) ${resp.status}: ${await readTextLimit(resp, 500)}`.trim());
+  const contentType = normalizeString(resp.headers?.get?.("content-type")).toLowerCase();
+  if (!contentType.includes("text/event-stream")) {
+    const preview = await readTextLimit(resp, 500);
+    throw new Error(`Anthropic(stream) 响应不是 SSE（content-type=${contentType || "unknown"}）；请确认 baseUrl 指向 Anthropic /messages SSE；body: ${preview}`.trim());
+  }
+  let dataEvents = 0;
+  let parsedChunks = 0;
+  let emitted = 0;
   for await (const ev of parseSse(resp)) {
     const data = normalizeString(ev?.data);
     if (!data) continue;
+    dataEvents += 1;
     let json;
     try { json = JSON.parse(data); } catch { continue; }
+    parsedChunks += 1;
     if (json?.type === "message_stop") break;
     if (json?.type === "content_block_delta" && json.delta && json.delta.type === "text_delta" && typeof json.delta.text === "string") {
       const t = json.delta.text;
-      if (t) yield t;
+      if (t) { emitted += 1; yield t; }
     }
   }
+  if (emitted === 0) throw new Error(`Anthropic(stream) 未解析到任何 SSE delta（data_events=${dataEvents}, parsed_chunks=${parsedChunks}）；请检查 baseUrl 是否为 Anthropic SSE`.trim());
 }
 
 function normalizeUsageInt(v) {
@@ -102,6 +114,11 @@ async function* anthropicChatStreamChunks({ baseUrl, apiKey, model, system, mess
   const { url, headers, body } = buildAnthropicRequest({ baseUrl, apiKey, model, system, messages, tools, extraHeaders, requestDefaults, stream: true });
   const resp = await safeFetch(url, { method: "POST", headers, body: JSON.stringify(body) }, { timeoutMs, abortSignal, label: "Anthropic(chat-stream)" });
   if (!resp.ok) throw new Error(`Anthropic(chat-stream) ${resp.status}: ${await readTextLimit(resp, 500)}`.trim());
+  const contentType = normalizeString(resp.headers?.get?.("content-type")).toLowerCase();
+  if (!contentType.includes("text/event-stream")) {
+    const preview = await readTextLimit(resp, 500);
+    throw new Error(`Anthropic(chat-stream) 响应不是 SSE（content-type=${contentType || "unknown"}）；请确认 baseUrl 指向 Anthropic /messages SSE；body: ${preview}`.trim());
+  }
 
   const metaMap = toolMetaByName instanceof Map ? toolMetaByName : new Map();
   const getToolMeta = (toolName) => metaMap.get(toolName) || {};
@@ -120,16 +137,21 @@ async function* anthropicChatStreamChunks({ baseUrl, apiKey, model, system, mess
   let toolName = "";
   let toolInputJson = "";
   let thinkingBuf = "";
+  let dataEvents = 0;
+  let parsedChunks = 0;
+  let emittedChunks = 0;
 
   for await (const ev of parseSse(resp)) {
     const data = normalizeString(ev?.data);
     if (!data) continue;
+    dataEvents += 1;
     let json;
     try {
       json = JSON.parse(data);
     } catch {
       continue;
     }
+    parsedChunks += 1;
     const eventType = normalizeString(json?.type) || normalizeString(ev?.event);
 
     const usage = (json?.message && typeof json.message === "object" ? json.message.usage : null) || json?.usage;
@@ -164,6 +186,7 @@ async function* anthropicChatStreamChunks({ baseUrl, apiKey, model, system, mess
         const t = delta.text;
         fullText += t;
         nodeId += 1;
+        emittedChunks += 1;
         yield makeBackChatChunk({ text: t, nodes: [rawResponseNode({ id: nodeId, content: t })] });
       } else if (dt === "input_json_delta" && typeof delta?.partial_json === "string" && delta.partial_json) {
         toolInputJson += delta.partial_json;
@@ -178,6 +201,7 @@ async function* anthropicChatStreamChunks({ baseUrl, apiKey, model, system, mess
         const summary = normalizeString(thinkingBuf);
         if (summary) {
           nodeId += 1;
+          emittedChunks += 1;
           yield makeBackChatChunk({ text: "", nodes: [thinkingNode({ id: nodeId, summary })] });
         }
         thinkingBuf = "";
@@ -192,9 +216,11 @@ async function* anthropicChatStreamChunks({ baseUrl, apiKey, model, system, mess
           sawToolUse = true;
           if (supportToolUseStart === true) {
             nodeId += 1;
+            emittedChunks += 1;
             yield makeBackChatChunk({ text: "", nodes: [toolUseStartNode({ id: nodeId, toolUseId: id, toolName: name, inputJson, mcpServerName: meta.mcpServerName, mcpToolName: meta.mcpToolName })] });
           }
           nodeId += 1;
+          emittedChunks += 1;
           yield makeBackChatChunk({ text: "", nodes: [toolUseNode({ id: nodeId, toolUseId: id, toolName: name, inputJson, mcpServerName: meta.mcpServerName, mcpToolName: meta.mcpToolName })] });
         }
         toolUseId = "";
@@ -217,7 +243,8 @@ async function* anthropicChatStreamChunks({ baseUrl, apiKey, model, system, mess
 
     if (eventType === "message_stop") break;
     if (eventType === "error") {
-      yield makeBackChatChunk({ text: "❌ 上游返回 error event", stop_reason: STOP_REASON_END_TURN });
+      const msg = normalizeString(json?.error?.message) || normalizeString(json?.message) || "upstream error event";
+      yield makeBackChatChunk({ text: `❌ 上游返回 error event: ${msg}`.trim(), stop_reason: STOP_REASON_END_TURN });
       return;
     }
   }
@@ -226,11 +253,17 @@ async function* anthropicChatStreamChunks({ baseUrl, apiKey, model, system, mess
     const summary = normalizeString(thinkingBuf);
     if (summary) {
       nodeId += 1;
+      emittedChunks += 1;
       yield makeBackChatChunk({ text: "", nodes: [thinkingNode({ id: nodeId, summary })] });
     }
   }
 
-  if (Number.isFinite(Number(usageInputTokens)) || Number.isFinite(Number(usageOutputTokens)) || Number.isFinite(Number(usageCacheReadInputTokens)) || Number.isFinite(Number(usageCacheCreationInputTokens))) {
+  const hasUsage = usageInputTokens != null || usageOutputTokens != null || usageCacheReadInputTokens != null || usageCacheCreationInputTokens != null;
+  if (emittedChunks === 0 && !hasUsage && !sawToolUse) {
+    throw new Error(`Anthropic(chat-stream) 未解析到任何上游 SSE 内容（data_events=${dataEvents}, parsed_chunks=${parsedChunks}）；请检查 baseUrl 是否为 Anthropic /messages SSE`);
+  }
+
+  if (hasUsage) {
     nodeId += 1;
     yield makeBackChatChunk({ text: "", nodes: [tokenUsageNode({ id: nodeId, inputTokens: usageInputTokens, outputTokens: usageOutputTokens, cacheReadInputTokens: usageCacheReadInputTokens, cacheCreationInputTokens: usageCacheCreationInputTokens })] });
   }

@@ -13,7 +13,9 @@ const {
   REQUEST_NODE_CHANGE_PERSONALITY,
   REQUEST_NODE_FILE,
   REQUEST_NODE_FILE_ID,
-  REQUEST_NODE_HISTORY_SUMMARY
+  REQUEST_NODE_HISTORY_SUMMARY,
+  TOOL_RESULT_CONTENT_TEXT,
+  TOOL_RESULT_CONTENT_IMAGE
 } = require("./augment-protocol");
 
 function buildOpenAiUserSegments(message, nodes) {
@@ -26,7 +28,6 @@ function buildOpenAiUserSegments(message, nodes) {
     segments.push({ kind: "text", text: String(text) });
     lastText = trimmed;
   };
-  const pushTextFromValue = (label, value) => pushText(shared.formatNodeValue(label, value));
   pushText(message);
   for (const node of shared.asArray(nodes)) {
     const r = shared.asRecord(node);
@@ -42,14 +43,14 @@ function buildOpenAiUserSegments(message, nodes) {
       if (!data) continue;
       segments.push({ kind: "image", media_type: shared.mapImageFormatToMimeType(shared.pick(img, ["format"])), data });
       lastText = null;
-    } else if (t === REQUEST_NODE_IMAGE_ID) pushTextFromValue("ImageId", shared.pick(r, ["image_id_node", "imageIdNode"]));
-    else if (t === REQUEST_NODE_IDE_STATE) pushTextFromValue("IdeState", shared.pick(r, ["ide_state_node", "ideStateNode"]));
-    else if (t === REQUEST_NODE_EDIT_EVENTS) pushTextFromValue("EditEvents", shared.pick(r, ["edit_events_node", "editEventsNode"]));
-    else if (t === REQUEST_NODE_CHECKPOINT_REF) pushTextFromValue("CheckpointRef", shared.pick(r, ["checkpoint_ref_node", "checkpointRefNode"]));
-    else if (t === REQUEST_NODE_CHANGE_PERSONALITY) pushTextFromValue("ChangePersonality", shared.pick(r, ["change_personality_node", "changePersonalityNode"]));
-    else if (t === REQUEST_NODE_FILE) pushTextFromValue("File", shared.pick(r, ["file_node", "fileNode"]));
-    else if (t === REQUEST_NODE_FILE_ID) pushTextFromValue("FileId", shared.pick(r, ["file_id_node", "fileIdNode"]));
-    else if (t === REQUEST_NODE_HISTORY_SUMMARY) pushTextFromValue("HistorySummary", shared.pick(r, ["history_summary_node", "historySummaryNode"]));
+    } else if (t === REQUEST_NODE_IMAGE_ID) pushText(shared.formatImageIdForPrompt(shared.pick(r, ["image_id_node", "imageIdNode"])));
+    else if (t === REQUEST_NODE_IDE_STATE) pushText(shared.formatIdeStateForPrompt(shared.pick(r, ["ide_state_node", "ideStateNode"])));
+    else if (t === REQUEST_NODE_EDIT_EVENTS) pushText(shared.formatEditEventsForPrompt(shared.pick(r, ["edit_events_node", "editEventsNode"])));
+    else if (t === REQUEST_NODE_CHECKPOINT_REF) pushText(shared.formatCheckpointRefForPrompt(shared.pick(r, ["checkpoint_ref_node", "checkpointRefNode"])));
+    else if (t === REQUEST_NODE_CHANGE_PERSONALITY) pushText(shared.formatChangePersonalityForPrompt(shared.pick(r, ["change_personality_node", "changePersonalityNode"])));
+    else if (t === REQUEST_NODE_FILE) pushText(shared.formatFileNodeForPrompt(shared.pick(r, ["file_node", "fileNode"])));
+    else if (t === REQUEST_NODE_FILE_ID) pushText(shared.formatFileIdForPrompt(shared.pick(r, ["file_id_node", "fileIdNode"])));
+    else if (t === REQUEST_NODE_HISTORY_SUMMARY) pushText(shared.formatHistorySummaryForPrompt(shared.pick(r, ["history_summary_node", "historySummaryNode"])));
   }
   return segments;
 }
@@ -96,13 +97,13 @@ function buildOpenAiToolResultText(fallbackText, contentNodes) {
   for (const n of nodes) {
     const r = shared.asRecord(n);
     const t = Number(shared.pick(r, ["type", "node_type", "nodeType"]));
-    if (t === 1) {
+    if (t === TOOL_RESULT_CONTENT_TEXT) {
       const text = normalizeString(shared.pick(r, ["text_content", "textContent"]));
       if (!text || shared.isPlaceholderMessage(text)) continue;
       if (lastText && lastText === text) continue;
       parts.push(text);
       lastText = text;
-    } else if (t === 2) {
+    } else if (t === TOOL_RESULT_CONTENT_IMAGE) {
       const img = shared.asRecord(shared.pick(r, ["image_content", "imageContent"]));
       const data = normalizeString(shared.pick(img, ["image_data", "imageData"]));
       if (!data) continue;
@@ -145,14 +146,15 @@ function buildOpenAiMessages(req) {
     const next = i + 1 < history.length ? history[i + 1] : null;
     if (next) messages.push(...buildOpenAiToolMessagesFromRequestNodes([...shared.asArray(next.request_nodes), ...shared.asArray(next.structured_request_nodes), ...shared.asArray(next.nodes)]));
   }
-  const currentNodes = [...shared.asArray(req.nodes), ...shared.asArray(req.structured_request_nodes), ...shared.asArray(req.request_nodes)];
-  messages.push(...buildOpenAiToolMessagesFromRequestNodes(currentNodes));
-  if (normalizeString(req.message) && !shared.isPlaceholderMessage(req.message)) {
-    const content = buildOpenAiMessageContent(buildOpenAiUserSegments(req.message, currentNodes));
-    if (content) messages.push({ role: "user", content });
-  }
+  const currentNodesAll = [...shared.asArray(req.nodes), ...shared.asArray(req.structured_request_nodes), ...shared.asArray(req.request_nodes)];
+  messages.push(...buildOpenAiToolMessagesFromRequestNodes(currentNodesAll));
+  const currentNodes = currentNodesAll.filter((n) => shared.normalizeNodeType(n) !== REQUEST_NODE_TOOL_RESULT);
+  const extraTextParts = shared.buildUserExtraTextParts(req, { hasNodes: currentNodes.length > 0 });
+  const segments = buildOpenAiUserSegments(req.message, currentNodes);
+  for (const t of shared.asArray(extraTextParts)) segments.push({ kind: "text", text: String(t ?? "") });
+  const content = buildOpenAiMessageContent(segments);
+  if (content) messages.push({ role: "user", content });
   return messages;
 }
 
 module.exports = { buildOpenAiMessages };
-

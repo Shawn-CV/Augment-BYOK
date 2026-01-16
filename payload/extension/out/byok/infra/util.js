@@ -28,6 +28,24 @@ function normalizeEndpoint(endpoint) {
   return p;
 }
 
+function normalizeRawToken(token) {
+  let t = normalizeString(token);
+  if (!t) return "";
+  if (t.toLowerCase().startsWith("bearer ")) t = t.slice(7).trim();
+  const eq = t.indexOf("=");
+  if (eq > 0 && eq < t.length - 1) {
+    const k = t.slice(0, eq).trim();
+    const v = t.slice(eq + 1).trim();
+    const looksLikeEnv =
+      k &&
+      v &&
+      /^[A-Z0-9_]+$/.test(k) &&
+      (k.endsWith("_TOKEN") || k.endsWith("_API_TOKEN") || k.endsWith("_KEY") || k.endsWith("_API_KEY"));
+    if (looksLikeEnv) t = v;
+  }
+  return t;
+}
+
 function parseByokModelId(modelId, opts) {
   const raw = normalizeString(modelId);
   if (!raw.startsWith("byok:")) return null;
@@ -72,4 +90,4 @@ function randomId() {
   return `r_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-module.exports = { normalizeString, requireString, normalizeEndpoint, parseByokModelId, safeTransform, emptyAsyncGenerator, randomId };
+module.exports = { normalizeString, requireString, normalizeEndpoint, normalizeRawToken, parseByokModelId, safeTransform, emptyAsyncGenerator, randomId };

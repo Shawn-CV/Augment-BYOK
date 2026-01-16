@@ -1,9 +1,11 @@
 "use strict";
 
+const nodePath = require("path");
+
 const { warn } = require("../infra/log");
 const { ensureConfigManager, state } = require("../config/state");
 const { decideRoute } = require("../core/router");
-const { normalizeEndpoint, normalizeString, safeTransform, emptyAsyncGenerator } = require("../infra/util");
+const { normalizeEndpoint, normalizeString, normalizeRawToken, safeTransform, emptyAsyncGenerator } = require("../infra/util");
 const { ensureModelRegistryFeatureFlags } = require("../core/model-registry");
 const { openAiCompleteText, openAiStreamTextDeltas, openAiChatStreamChunks } = require("../providers/openai");
 const { anthropicCompleteText, anthropicStreamTextDeltas, anthropicChatStreamChunks } = require("../providers/anthropic");
@@ -12,6 +14,7 @@ const { getOfficialConnection } = require("../config/official");
 const { normalizeAugmentChatRequest, buildSystemPrompt, convertOpenAiTools, convertAnthropicTools, buildToolMetaByName, buildOpenAiMessages, buildAnthropicMessages } = require("../core/augment-chat");
 const { maybeSummarizeAndCompactAugmentChatRequest } = require("../core/augment-history-summary-auto");
 const { STOP_REASON_END_TURN, makeBackChatChunk } = require("../core/augment-protocol");
+const { makeEndpointErrorText, guardObjectStream } = require("../core/stream-guard");
 const {
   buildMessagesForEndpoint,
   makeBackTextResult,
@@ -26,7 +29,7 @@ const {
 
 function resolveProviderApiKey(provider, label) {
   if (!provider || typeof provider !== "object") throw new Error(`${label} provider 无效`);
-  const key = normalizeString(provider.apiKey);
+  const key = normalizeRawToken(provider.apiKey);
   if (key) return key;
   throw new Error(`${label} 未配置 api_key`);
 }
@@ -72,6 +75,178 @@ function normalizeLineNumber(v) {
   if (!Number.isFinite(n)) return null;
   if (n <= 0) return 0;
   return Math.floor(n);
+}
+
+function normalizeNewlines(s) {
+  return typeof s === "string" ? s.replace(/\r\n/g, "\n") : "";
+}
+
+function countNewlines(s) {
+  const text = typeof s === "string" ? s : "";
+  let n = 0;
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) n += 1;
+  return n;
+}
+
+function clampLineNumber(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 1;
+  if (v <= 1) return 1;
+  return Math.floor(v);
+}
+
+function commonPrefixLen(a, b) {
+  const s1 = typeof a === "string" ? a : "";
+  const s2 = typeof b === "string" ? b : "";
+  const n = Math.min(s1.length, s2.length);
+  let i = 0;
+  for (; i < n; i++) if (s1.charCodeAt(i) !== s2.charCodeAt(i)) break;
+  return i;
+}
+
+function commonSuffixLen(a, b) {
+  const s1 = typeof a === "string" ? a : "";
+  const s2 = typeof b === "string" ? b : "";
+  const n = Math.min(s1.length, s2.length);
+  let i = 0;
+  for (; i < n; i++) if (s1.charCodeAt(s1.length - 1 - i) !== s2.charCodeAt(s2.length - 1 - i)) break;
+  return i;
+}
+
+function bestMatchIndex(haystack, needle, { prefixHint, suffixHint, maxCandidates = 200 } = {}) {
+  const h = typeof haystack === "string" ? haystack : "";
+  const n = typeof needle === "string" ? needle : "";
+  if (!h || !n) return -1;
+  const pre = typeof prefixHint === "string" ? prefixHint : "";
+  const suf = typeof suffixHint === "string" ? suffixHint : "";
+  let bestIdx = -1;
+  let bestScore = -1;
+  let i = 0;
+  for (let pos = h.indexOf(n); pos !== -1; pos = h.indexOf(n, pos + 1)) {
+    i += 1;
+    if (i > maxCandidates) break;
+    const before = pre ? h.slice(Math.max(0, pos - pre.length), pos) : "";
+    const after = suf ? h.slice(pos + n.length, pos + n.length + suf.length) : "";
+    const score = commonSuffixLen(before, pre) * 2 + commonPrefixLen(after, suf);
+    if (score > bestScore || (score === bestScore && pos > bestIdx)) { bestScore = score; bestIdx = pos; }
+  }
+  return bestIdx;
+}
+
+function bestInsertionIndex(haystack, { prefixHint, suffixHint, maxCandidates = 200 } = {}) {
+  const h = typeof haystack === "string" ? haystack : "";
+  const pre = typeof prefixHint === "string" ? prefixHint : "";
+  const suf = typeof suffixHint === "string" ? suffixHint : "";
+  if (!h) return 0;
+  if (!pre && !suf) return 0;
+
+  if (pre) {
+    let bestIdx = -1;
+    let bestScore = -1;
+    let i = 0;
+    for (let pos = h.indexOf(pre); pos !== -1; pos = h.indexOf(pre, pos + 1)) {
+      i += 1;
+      if (i > maxCandidates) break;
+      const ins = pos + pre.length;
+      const after = suf ? h.slice(ins, ins + suf.length) : "";
+      const score = pre.length * 2 + commonPrefixLen(after, suf);
+      if (score > bestScore || (score === bestScore && ins > bestIdx)) { bestScore = score; bestIdx = ins; }
+    }
+    if (bestIdx >= 0) return bestIdx;
+  }
+
+  if (suf) {
+    const pos = h.indexOf(suf);
+    if (pos >= 0) return pos;
+  }
+  return 0;
+}
+
+function trimTrailingNewlines(s) {
+  const t = normalizeNewlines(s);
+  return t.replace(/\n+$/g, "");
+}
+
+function resolveTextField(obj, keys) {
+  const b = obj && typeof obj === "object" ? obj : {};
+  for (const k of Array.isArray(keys) ? keys : []) {
+    if (typeof b[k] === "string") return b[k];
+  }
+  return "";
+}
+
+async function readWorkspaceFileTextByPath(p) {
+  const raw = normalizeString(p);
+  if (!raw) return "";
+  const vscode = state.vscode;
+  const ws = vscode && vscode.workspace ? vscode.workspace : null;
+  const Uri = vscode && vscode.Uri ? vscode.Uri : null;
+  if (!ws || !ws.fs || typeof ws.fs.readFile !== "function" || !Uri) return "";
+
+  const tryRead = async (uri) => {
+    try {
+      const bytes = await ws.fs.readFile(uri);
+      return Buffer.from(bytes).toString("utf8");
+    } catch {
+      return "";
+    }
+  };
+
+  if (raw.includes("://")) {
+    try { return await tryRead(Uri.parse(raw)); } catch {}
+  }
+
+  try {
+    if (nodePath.isAbsolute(raw)) return await tryRead(Uri.file(raw));
+  } catch {}
+
+  const rel = raw.replace(/\\/g, "/").replace(/^\/+/, "");
+  const folders = Array.isArray(ws.workspaceFolders) ? ws.workspaceFolders : [];
+  for (const f of folders) {
+    const base = f && f.uri ? f.uri : null;
+    if (!base) continue;
+    const u = Uri.joinPath(base, rel);
+    const txt = await tryRead(u);
+    if (txt) return txt;
+  }
+  return "";
+}
+
+async function buildInstructionReplacementMeta(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const selectedTextRaw = resolveTextField(b, ["selected_text", "selectedText"]);
+  const prefixRaw = resolveTextField(b, ["prefix"]);
+  const suffixRaw = resolveTextField(b, ["suffix"]);
+  const targetPath = normalizeString(resolveTextField(b, ["target_file_path", "targetFilePath"]));
+  const path = normalizeString(resolveTextField(b, ["path", "pathName"]));
+  const filePath = targetPath || path;
+
+  const targetFileContentRaw = resolveTextField(b, ["target_file_content", "targetFileContent"]);
+  const fileTextRaw = targetFileContentRaw ? targetFileContentRaw : await readWorkspaceFileTextByPath(filePath);
+  const fileText = normalizeNewlines(fileTextRaw);
+  const selectedText = normalizeNewlines(selectedTextRaw);
+  const prefix = normalizeNewlines(prefixRaw);
+  const suffix = normalizeNewlines(suffixRaw);
+
+  const prefixHint = prefix ? prefix.slice(Math.max(0, prefix.length - 400)) : "";
+  const suffixHint = suffix ? suffix.slice(0, 400) : "";
+
+  if (fileText && selectedText) {
+    const idx = bestMatchIndex(fileText, selectedText, { prefixHint, suffixHint });
+    if (idx >= 0) {
+      const startLine = 1 + countNewlines(fileText.slice(0, idx));
+      const trimmed = trimTrailingNewlines(selectedText);
+      const endLine = startLine + countNewlines(trimmed);
+      return { replacement_start_line: clampLineNumber(startLine), replacement_end_line: clampLineNumber(endLine), replacement_old_text: selectedText };
+    }
+  }
+
+  const insertIdx = fileText ? bestInsertionIndex(fileText, { prefixHint, suffixHint }) : 0;
+  const insertLine = fileText ? 1 + countNewlines(fileText.slice(0, insertIdx)) : 1;
+  const lines = fileText ? fileText.split("\n") : [];
+  const lineBefore = insertLine > 1 && lines[insertLine - 2] != null ? String(lines[insertLine - 2]).trimEnd() : "";
+  const oldText = selectedText ? selectedText : `PURE INSERTION AFTER LINE:${lineBefore}`;
+  return { replacement_start_line: clampLineNumber(insertLine), replacement_end_line: clampLineNumber(insertLine), replacement_old_text: oldText };
 }
 
 function pickNextEditLocationCandidates(body) {
@@ -240,7 +415,7 @@ async function maybeHandleCallApi({ endpoint, body, transform, timeoutMs, abortS
     try {
       const off = getOfficialConnection();
       const completionURL = off.completionURL;
-      const apiToken = normalizeString(upstreamApiToken) || off.apiToken;
+      const apiToken = normalizeRawToken(upstreamApiToken) || off.apiToken;
       const upstream = await fetchOfficialGetModels({ completionURL, apiToken, timeoutMs: Math.min(12000, t), abortSignal });
       const merged = mergeModels(upstream, byokModels, { defaultModel: preferredDefaultModel });
       return safeTransform(transform, merged, ep);
@@ -254,7 +429,7 @@ async function maybeHandleCallApi({ endpoint, body, transform, timeoutMs, abortS
   if (ep === "/completion" || ep === "/chat-input-completion") {
     const { system, messages } = buildMessagesForEndpoint(ep, body);
     const text = await byokCompleteText({ provider: route.provider, model: route.model, system, messages, timeoutMs: t, abortSignal });
-    return safeTransform(transform, makeBackCompletionResult(text, { timeoutMs: t }), ep);
+    return safeTransform(transform, makeBackCompletionResult(text), ep);
   }
 
   if (ep === "/edit") {
@@ -264,9 +439,27 @@ async function maybeHandleCallApi({ endpoint, body, transform, timeoutMs, abortS
   }
 
   if (ep === "/chat") {
-    const { system, messages } = buildMessagesForEndpoint(ep, body);
-    const text = await byokCompleteText({ provider: route.provider, model: route.model, system, messages, timeoutMs: t, abortSignal });
-    return safeTransform(transform, makeBackChatResult(text, { nodes: [] }), ep);
+    const { type, baseUrl, apiKey, extraHeaders, requestDefaults } = providerRequestContext(route.provider);
+    const req = normalizeAugmentChatRequest(body);
+    const msg = normalizeString(req.message);
+    const hasNodes = Array.isArray(req.nodes) && req.nodes.length;
+    const hasHistory = Array.isArray(req.chat_history) && req.chat_history.length;
+    const hasReqNodes = (Array.isArray(req.structured_request_nodes) && req.structured_request_nodes.length) || (Array.isArray(req.request_nodes) && req.request_nodes.length);
+    if (!msg && !hasNodes && !hasHistory && !hasReqNodes) return safeTransform(transform, makeBackChatResult("", { nodes: [] }), ep);
+    try {
+      await maybeSummarizeAndCompactAugmentChatRequest({ cfg, req, requestedModel: route.requestedModel, fallbackProvider: route.provider, fallbackModel: route.model, timeoutMs: t, abortSignal });
+    } catch (err) {
+      warn(`historySummary failed (ignored): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (type === "openai_compatible") {
+      const text = await openAiCompleteText({ baseUrl, apiKey, model: route.model, messages: buildOpenAiMessages(req), timeoutMs: t, abortSignal, extraHeaders, requestDefaults });
+      return safeTransform(transform, makeBackChatResult(text, { nodes: [] }), ep);
+    }
+    if (type === "anthropic") {
+      const text = await anthropicCompleteText({ baseUrl, apiKey, model: route.model, system: buildSystemPrompt(req), messages: buildAnthropicMessages(req), timeoutMs: t, abortSignal, extraHeaders, requestDefaults });
+      return safeTransform(transform, makeBackChatResult(text, { nodes: [] }), ep);
+    }
+    throw new Error(`未知 provider.type: ${type}`);
   }
 
   if (ep === "/next_edit_loc") {
@@ -296,31 +489,53 @@ async function maybeHandleCallApiStream({ endpoint, body, transform, timeoutMs, 
 
   if (ep === "/chat-stream") {
     const src = byokChatStream({ cfg, provider: route.provider, model: route.model, requestedModel: route.requestedModel, body, timeoutMs: t, abortSignal });
-    return (async function* () { for await (const raw of src) yield safeTransform(transform, raw, ep); })();
+    return guardObjectStream({
+      ep,
+      src,
+      transform,
+      makeErrorChunk: (err) => makeBackChatChunk({ text: makeEndpointErrorText(ep, err), stop_reason: STOP_REASON_END_TURN })
+    });
   }
 
   if (ep === "/prompt-enhancer" || ep === "/generate-conversation-title") {
     const { system, messages } = buildMessagesForEndpoint(ep, body);
     const src = byokStreamText({ provider: route.provider, model: route.model, system, messages, timeoutMs: t, abortSignal });
-    return (async function* () {
-      for await (const delta of src) yield safeTransform(transform, makeBackChatResult(delta, { nodes: [] }), ep);
-    })();
+    return guardObjectStream({
+      ep,
+      transform,
+      src: (async function* () { for await (const delta of src) yield makeBackChatResult(delta, { nodes: [] }); })(),
+      makeErrorChunk: (err) => makeBackChatResult(makeEndpointErrorText(ep, err), { nodes: [] })
+    });
   }
 
   if (ep === "/instruction-stream" || ep === "/smart-paste-stream") {
     const { system, messages } = buildMessagesForEndpoint(ep, body);
+    const meta = await buildInstructionReplacementMeta(body);
     const src = byokStreamText({ provider: route.provider, model: route.model, system, messages, timeoutMs: t, abortSignal });
-    return (async function* () {
-      for await (const delta of src) yield safeTransform(transform, { text: typeof delta === "string" ? delta : String(delta ?? "") }, ep);
-    })();
+    return guardObjectStream({
+      ep,
+      transform,
+      src: (async function* () {
+        yield { text: "", ...meta };
+        for await (const delta of src) {
+          const t = typeof delta === "string" ? delta : String(delta ?? "");
+          if (!t) continue;
+          yield { text: t, replacement_text: t };
+        }
+      })(),
+      makeErrorChunk: (err) => ({ text: makeEndpointErrorText(ep, err), ...meta })
+    });
   }
 
   if (ep === "/generate-commit-message-stream") {
     const { system, messages } = buildMessagesForEndpoint(ep, body);
     const src = byokStreamText({ provider: route.provider, model: route.model, system, messages, timeoutMs: t, abortSignal });
-    return (async function* () {
-      for await (const delta of src) yield safeTransform(transform, makeBackChatResult(delta, { nodes: [] }), ep);
-    })();
+    return guardObjectStream({
+      ep,
+      transform,
+      src: (async function* () { for await (const delta of src) yield makeBackChatResult(delta, { nodes: [] }); })(),
+      makeErrorChunk: (err) => makeBackChatResult(makeEndpointErrorText(ep, err), { nodes: [] })
+    });
   }
 
   if (ep === "/next-edit-stream") {

@@ -1,5 +1,6 @@
 "use strict";
 
+const shared = require("./augment-struct");
 const {
   REQUEST_NODE_TEXT,
   REQUEST_NODE_TOOL_RESULT,
@@ -9,31 +10,7 @@ const {
   RESPONSE_NODE_TOOL_USE
 } = require("./augment-protocol");
 
-function asRecord(v) {
-  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
-}
-
-function asArray(v) {
-  return Array.isArray(v) ? v : [];
-}
-
-function asString(v) {
-  if (typeof v === "string") return v;
-  if (v == null) return "";
-  return String(v);
-}
-
-function pick(obj, keys) {
-  const o = asRecord(obj);
-  for (const k of Array.isArray(keys) ? keys : []) if (Object.prototype.hasOwnProperty.call(o, k)) return o[k];
-  return undefined;
-}
-
-function normalizeNodeType(node) {
-  const v = pick(node, ["type", "node_type", "nodeType"]);
-  const n = Number(v);
-  return Number.isFinite(n) ? n : -1;
-}
+const { asRecord, asArray, asString, pick, normalizeNodeType } = shared;
 
 function normalizeJoinedLines(lines) {
   let out = "";
@@ -232,4 +209,3 @@ function compactAugmentChatHistory(chatHistory) {
 }
 
 module.exports = { compactAugmentChatHistory, renderHistorySummaryNodeValue };
-

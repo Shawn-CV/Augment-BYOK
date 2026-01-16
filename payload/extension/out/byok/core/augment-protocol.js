@@ -30,6 +30,19 @@ const STOP_REASON_SAFETY = 4;
 const STOP_REASON_RECITATION = 5;
 const STOP_REASON_MALFORMED_FUNCTION_CALL = 6;
 
+const IMAGE_FORMAT_UNSPECIFIED = 0;
+const IMAGE_FORMAT_PNG = 1;
+const IMAGE_FORMAT_JPEG = 2;
+const IMAGE_FORMAT_GIF = 3;
+const IMAGE_FORMAT_WEBP = 4;
+
+const TOOL_RESULT_CONTENT_TEXT = 1;
+const TOOL_RESULT_CONTENT_IMAGE = 2;
+
+const PERSONA_PROTOTYPER = 1;
+const PERSONA_BRAINSTORM = 2;
+const PERSONA_REVIEWER = 3;
+
 function mapAnthropicStopReasonToAugment(reason) {
   const r = typeof reason === "string" ? reason.trim().toLowerCase() : "";
   if (r === "end_turn") return STOP_REASON_END_TURN;
@@ -125,6 +138,16 @@ module.exports = {
   STOP_REASON_SAFETY,
   STOP_REASON_RECITATION,
   STOP_REASON_MALFORMED_FUNCTION_CALL,
+  IMAGE_FORMAT_UNSPECIFIED,
+  IMAGE_FORMAT_PNG,
+  IMAGE_FORMAT_JPEG,
+  IMAGE_FORMAT_GIF,
+  IMAGE_FORMAT_WEBP,
+  TOOL_RESULT_CONTENT_TEXT,
+  TOOL_RESULT_CONTENT_IMAGE,
+  PERSONA_PROTOTYPER,
+  PERSONA_BRAINSTORM,
+  PERSONA_REVIEWER,
   mapAnthropicStopReasonToAugment,
   mapOpenAiFinishReasonToAugment,
   rawResponseNode,
@@ -135,4 +158,3 @@ module.exports = {
   tokenUsageNode,
   makeBackChatChunk
 };
-
