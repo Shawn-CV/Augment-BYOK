@@ -1,24 +1,33 @@
-# Augment-BYOK（全新版本 / 设计骨架）
+# Augment-BYOK
 
-目标：在**不破坏原生 Augment 体验**的前提下，实现 **BYOK（OpenAI / Anthropic）**，且交付为**单一 VSIX**（无需 Rust/外部服务）。
+单一 VSIX：把 Augment 的 **13 个 LLM 数据面端点**按路由转到 BYOK（支持 Streaming），其它端点保持官方行为；支持运行时一键回滚（无需 Rust/外部服务）。
 
-本目录是“从零重来”的新版本（不继承 `AugmentBYOK/` 的历史结构），先用文档把边界/契约/最小补丁面冻结，再进入实现。
+## 安装（推荐：Releases）
 
-## 核心约束（不可谈判）
+- GitHub Releases（tag：`rolling`）下载 `augment.vscode-augment.*.byok.vsix`
+- VS Code → Extensions → `...` → `Install from VSIX...` → Reload Window
 
-- Augment 后端是**自定义协议**（必须对齐 `/chat-stream` 等行为）。
-- Augment 可用 `completionURL` + `apiToken`，但 BYOK **不允许依赖/污染 settings**（通过扩展内部配置注入 official 值；尤其禁止 `augment.advanced.chat*` 这类扩展设置面）。
-- BYOK 仅支持：OpenAI / Anthropic。
-- 配置与 Key/Token 全部由扩展内部持久化（`globalState`），通过 `BYOK: Open Config Panel` 管理；不再依赖 env / 外部 YAML。
-- 必须注入 `AugmentBYOK/references/Augment-BYOK-Proxy/vsix-patch/inject-code.txt`（新版本会在 `vendor/` 保留同内容副本，便于自包含构建）。
-- `autoAuth` 必须**彻底禁用**（不允许影响网关/路由/配置）。
-- 目标能力：协议彻底打通、配置热更新、Streaming 完整支持、配置驱动 model 映射、最小路由、错误归一+超时控制、一键回滚。
+## 配置
 
-## 文档入口
+- `BYOK: Open Config Panel`：填写 `official` + ≥1 个 `provider` → `Save`
+- `Self Test`：可选，一键验证 models / chat / chat-stream
+- 配置存 `globalState`（含 Key/Token）；字段/限制见 `docs/CONFIG.md`
 
-- `Augment-BYOK/docs/PRD.md`：产品边界（目标/非目标/验收）。
-- `Augment-BYOK/docs/ARCH.md`：系统架构与最小补丁面（如何“不破坏原生 Augment”）。
-- `Augment-BYOK/docs/CONFIG.md`：配置与环境变量约定（支持热更新）。
-- `Augment-BYOK/docs/ENDPOINTS.md`：上游 71 端点功能映射 + LLM=13 边界。
-- `Augment-BYOK/docs/CODESTYLE.md`：强制代码规范（单文件 ≤ 400 行等）。
-- `Augment-BYOK/docs/CI.md`：增量审查 + 自动构建发布 + 定时上游更新检查。
+常用命令：
+- `BYOK: Enable` / `BYOK: Disable (Rollback)`
+- `BYOK: Reload Config`
+- `BYOK: Clear History Summary Cache`
+
+## 本地构建
+
+前置：Node.js 20+、Python 3、可访问 Marketplace  
+命令：`npm run build:vsix`  
+产物：`dist/augment.vscode-augment.<upstreamVersion>.byok.vsix`
+
+## 文档
+
+- 索引：`docs/README.md`
+- 配置/路由：`docs/CONFIG.md`
+- 端点范围（71/13）：`docs/ENDPOINTS.md`
+- 架构/补丁面：`docs/ARCH.md`
+- CI/Release：`docs/CI.md`

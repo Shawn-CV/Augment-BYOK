@@ -1,44 +1,17 @@
-# TESTPLAN：验收与回归（面向“不会再破坏原生 Augment”）
+# TESTPLAN（最小回归清单）
 
-## 1) 构建期（自动化可做）
+## 构建期（自动）
 
-- Patch 成功标记：每个补丁都写入唯一 marker（避免重复注入/多次 patch）。
-- `autoAuth` guard：最终产物中不得出现：
-  - `case "/autoAuth"`
-  - `handleAutoAuth`
-  - `__augment_byok_autoauth_patched`
-- inject-code guard：最终产物必须包含：
-  - `Augment Interceptor Injection Start`
-  - `Augment Interceptor Injection End`
-- JS 语法检查：`node --check out/extension.js`（或等价校验）
+- patch marker 存在（避免重复注入）
+- guard：产物不含 `/autoAuth` / `handleAutoAuth` / `__augment_byok_autoauth_patched`
+- guard：injector marker 存在（`Augment Interceptor Injection Start/End`）
+- `node --check out/extension.js`
+- BYOK 合约检查（`tools/check/byok-contracts.js`）
 
-## 2) 运行期（手动验收即可，先别上复杂自动化）
+## 运行期（手动）
 
-### 基础可用性（BYOK 关闭）
-- 安装 VSIX → 重载窗口 → 正常登录/使用 Augment（确保“原生不坏”是默认态）
-
-### BYOK 开启（最小闭环）
-- 打开 `BYOK: Open Config Panel`：
-  - 配置 `official.completionUrl` + `official.apiToken`
-  - 配置 `providers[].apiKey`（OpenAI / Anthropic）
-  - 确认 `/chat-stream` 设为 `byok`
-- 打开聊天 → 验证：
-  - 流式输出连续、无卡死
-  - 中断/取消生效（Abort）
-
-### 热更新
-- 在面板里修改配置并 Save（例如切换默认 provider/model 或把某端点设为 disabled）
-- 不重启 VS Code，发起下一次请求验证新规则生效
-- 配置写错时（字段类型错误/JSON import 无法解析）：
-  - 不崩溃
-  - 继续使用旧配置
-  - 有明确日志/提示
-
-### 一键回滚
-- 执行 “BYOK: Disable (Rollback)” 命令
-- 立刻发起请求，确认已回到官方链路（或按策略 passthrough）
-
-### 错误归一
-- Key 缺失：应给出稳定、可解释错误（不要让 Augment UI 卡死/无限重试）
-- 上游 401/429/5xx：错误信息应包含 provider + endpoint + requestId（且不泄露 key）
-- 超时：明确区分 “上游超时” vs “用户取消”
+- BYOK 关闭：Augment 原生可用（“不破坏原生”是默认态）
+- BYOK 开启：面板填写 `official` + ≥1 provider；`/chat-stream` 流式输出 OK；Abort OK（或直接跑 `Self Test`）
+- 热更新：面板 `Save` 后下一次请求生效；错误配置不崩溃（保留 last-good）
+- 回滚：`BYOK: Disable (Rollback)` 后立即回到官方链路
+- 错误：缺 key / 401/429/5xx / timeout 信息可读且不泄露 key/token

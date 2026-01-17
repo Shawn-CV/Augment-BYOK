@@ -1,29 +1,11 @@
-# CODESTYLE：代码规范（强制约束，防止再次结构失控）
+# CODESTYLE
 
-目标：让代码“天然可维护”，而不是靠自觉。
+硬规则（为避免再次结构失控）：
 
-## 1) 文件与复杂度上限（硬规则）
+- 单文件 ≤ 400 行；单函数 ≤ 80 行；单模块单职责
+- patch 薄、域层厚：注入只交控制权给 shim；逻辑放在 `payload/extension/out/byok/*`
+- 失败可控：异常必须可回落 official（`return undefined` / empty stream）
+- 运行时只用 `fetch` + 基础工具；避免 `child_process` 等高风险面
+- 日志必须脱敏（永不输出 key/token 全文）
 
-- **单文件 ≤ 400 行**（超过必须拆分；不接受“先写完再说”）。
-- **单函数 ≤ 80 行**（超过必须拆分；优先拆成纯函数）。
-- **单模块单职责**：一个文件只回答一个问题（Config / Router / Provider / Protocol / Errors / Commands…）。
-
-## 2) 结构原则（为什么这样分）
-
-- **薄注入，厚域层**：patch 只负责“把控制权交给 shim”；协议/路由/上游适配全部在独立模块。
-- **显式依赖注入**：Provider/Router/ConfigManager 都用入参传递（避免全局隐式状态蔓延）。
-- **失败可控**：任何异常都必须能落到“返回 undefined → 回退官方链路”。
-
-## 3) TypeScript 约定
-
-本项目运行时代码为 **CommonJS JavaScript**（`payload/extension/out/byok/*`），不引入 TS 编译链；依然用“类型边界”思路约束复杂度：
-
-- 关键结构用“显式字段约定 + normalize/validate”固定形状（config、router decision、provider request、stream event）。
-- 输入边界统一做 `unknown -> normalize`，内部避免隐式 `any` 扩散（宁可显式抛错/回退 official）。
-- 避免无边界 class：优先纯函数 + 小模块；需要状态时集中到 `state/config` 单点管理。
-
-## 4) 运行时约定（与 Augment 注入环境兼容）
-
-- 不依赖 VS Code settings（避免 settings 干预）；配置与 Key/Token 存在 extension `globalState`（可导入/导出 JSON）。
-- 不依赖 Node 原生模块的“高风险面”（例如 `child_process`）；仅用 `fetch` + 基础工具函数。
-- 所有日志必须脱敏（永不输出 key/token 全文）。
+备注：运行时代码为 CommonJS JS；类型边界用 `normalize/validate` 固定形状。
