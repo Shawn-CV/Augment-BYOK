@@ -64,6 +64,7 @@ function repairOpenAiToolCallPairs(messages, opts) {
   };
 
   let pending = null; // Map<string, {id,name,arguments}>
+  let bufferedOrphanToolMessages = null; // Array<msg>
 
   const injectMissing = () => {
     if (!pending || pending.size === 0) {
@@ -82,6 +83,25 @@ function repairOpenAiToolCallPairs(messages, opts) {
     report.converted_orphan_tool_results += 1;
   };
 
+  const bufferOrphanTool = (msg) => {
+    if (!bufferedOrphanToolMessages) bufferedOrphanToolMessages = [];
+    bufferedOrphanToolMessages.push(msg);
+  };
+
+  const flushBufferedOrphans = () => {
+    if (!bufferedOrphanToolMessages || bufferedOrphanToolMessages.length === 0) {
+      bufferedOrphanToolMessages = null;
+      return;
+    }
+    for (const msg of bufferedOrphanToolMessages) handleOrphanTool(msg);
+    bufferedOrphanToolMessages = null;
+  };
+
+  const closePendingToolPhase = () => {
+    injectMissing();
+    flushBufferedOrphans();
+  };
+
   for (const msg of input) {
     const role = normalizeRole(msg?.role);
 
@@ -91,15 +111,20 @@ function repairOpenAiToolCallPairs(messages, opts) {
         if (id && pending.has(id)) {
           pending.delete(id);
           out.push(msg);
+          if (pending.size === 0) {
+            pending = null;
+            flushBufferedOrphans();
+          }
         } else {
-          // tool_result 没有匹配到任何待处理 tool_calls；保守起见转换为 user 文本，避免上游报错
-          handleOrphanTool(msg);
+          // tool_result 没有匹配到任何待处理 tool_calls；
+          // 不能直接转换为 user 并插入（会打断 assistant(tool_calls)->tool 的强制相邻约束），先缓冲，等 pending 结束再处理。
+          bufferOrphanTool(msg);
         }
         continue;
       }
 
       // 遇到非 tool 消息，说明 tool_result 阶段已结束；把缺失的补齐到当前消息之前，保证顺序合法
-      injectMissing();
+      closePendingToolPhase();
       // 继续处理当前消息（fallthrough）
     }
 
@@ -113,6 +138,7 @@ function repairOpenAiToolCallPairs(messages, opts) {
         m.set(tc.id, tc);
       }
       pending = m.size ? m : null;
+      bufferedOrphanToolMessages = null;
       continue;
     }
 
@@ -125,7 +151,7 @@ function repairOpenAiToolCallPairs(messages, opts) {
     out.push(msg);
   }
 
-  injectMissing();
+  closePendingToolPhase();
   return { messages: out, report };
 }
 
@@ -180,6 +206,7 @@ function repairOpenAiResponsesToolCallPairs(inputItems, opts) {
   };
 
   let pending = null; // Map<string, {call_id,name,arguments}>
+  let bufferedOrphanOutputs = null; // Array<item>
 
   const injectMissing = () => {
     if (!pending || pending.size === 0) {
@@ -191,6 +218,28 @@ function repairOpenAiResponsesToolCallPairs(inputItems, opts) {
       report.injected_missing_tool_results += 1;
     }
     pending = null;
+  };
+
+  const bufferOrphanOutput = (item) => {
+    if (!bufferedOrphanOutputs) bufferedOrphanOutputs = [];
+    bufferedOrphanOutputs.push(item);
+  };
+
+  const flushBufferedOrphans = () => {
+    if (!bufferedOrphanOutputs || bufferedOrphanOutputs.length === 0) {
+      bufferedOrphanOutputs = null;
+      return;
+    }
+    for (const item of bufferedOrphanOutputs) {
+      out.push(buildOrphanOpenAiResponsesToolResultAsUserMessage(item, opts));
+      report.converted_orphan_tool_results += 1;
+    }
+    bufferedOrphanOutputs = null;
+  };
+
+  const closePendingToolPhase = () => {
+    injectMissing();
+    flushBufferedOrphans();
   };
 
   for (const item of input) {
@@ -208,14 +257,18 @@ function repairOpenAiResponsesToolCallPairs(inputItems, opts) {
         if (callId && pending.has(callId)) {
           pending.delete(callId);
           out.push(item);
+          if (pending.size === 0) {
+            pending = null;
+            flushBufferedOrphans();
+          }
         } else {
-          out.push(buildOrphanOpenAiResponsesToolResultAsUserMessage(item, opts));
-          report.converted_orphan_tool_results += 1;
+          // 同 OpenAI chat：pending 存在时不能插入非 function_call_output（会打断严格配对），先缓冲
+          bufferOrphanOutput(item);
         }
         continue;
       }
 
-      injectMissing();
+      closePendingToolPhase();
       // fallthrough
     }
 
@@ -224,6 +277,7 @@ function repairOpenAiResponsesToolCallPairs(inputItems, opts) {
       if (!pending) pending = new Map();
       const tc = normalizeFunctionCall(item);
       if (tc && !pending.has(tc.call_id)) pending.set(tc.call_id, tc);
+      bufferedOrphanOutputs = null;
       continue;
     }
     if (type === "function_call_output") {
@@ -235,7 +289,7 @@ function repairOpenAiResponsesToolCallPairs(inputItems, opts) {
     out.push(item);
   }
 
-  injectMissing();
+  closePendingToolPhase();
   return { input: out, report };
 }
 
@@ -335,6 +389,20 @@ function repairAnthropicToolUsePairs(messages, opts) {
             }
           } else newBlocks.push(b);
         }
+
+        // 保证：紧随 tool_use 的这一条 user 消息中包含所有 pending 的 tool_result；
+        // 否则某些上游会认为 tool_use 没有被正确回填而报错。
+        if (pending.size) {
+          for (const tc of pending.values()) {
+            newBlocks.push(buildMissingAnthropicToolResultBlock({ toolUseId: tc.toolUseId, toolName: tc.toolName, input: tc.input }));
+            report.injected_missing_tool_results += 1;
+          }
+          pending = null;
+          changed = true;
+        } else if (pending.size === 0) {
+          pending = null;
+        }
+
         out.push(changed ? { ...msg, content: newBlocks } : msg);
         continue;
       }

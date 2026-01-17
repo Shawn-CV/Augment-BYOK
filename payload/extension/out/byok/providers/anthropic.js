@@ -64,10 +64,34 @@ async function anthropicCompleteText({ baseUrl, apiKey, model, system, messages,
 
   if (!resp.ok) throw new Error(`Anthropic ${resp.status}: ${await readTextLimit(resp, 500)}`.trim());
   const json = await resp.json().catch(() => null);
-  const blocks = Array.isArray(json?.content) ? json.content : [];
-  const out = blocks.map((b) => (b && b.type === "text" && typeof b.text === "string" ? b.text : "")).join("");
-  if (!out) throw new Error("Anthropic 响应缺少 content[].text");
-  return out;
+  const extractText = (obj) => {
+    const rec = obj && typeof obj === "object" ? obj : null;
+    if (!rec) return "";
+    if (typeof rec.content === "string" && rec.content.trim()) return rec.content;
+    const blocks = Array.isArray(rec.content) ? rec.content : [];
+    const text = blocks.map((b) => (b && b.type === "text" && typeof b.text === "string" ? b.text : "")).join("");
+    if (text.trim()) return text;
+    return "";
+  };
+
+  const out = extractText(json) || extractText(json?.message) || normalizeString(json?.completion ?? json?.output_text ?? json?.outputText ?? json?.text);
+  if (out) return out;
+
+  // 兼容部分网关：OpenAI 形状（choices[0].message.content 或 choices[0].text）
+  const oai = json && typeof json === "object" ? json : {};
+  const choice0 = Array.isArray(oai.choices) ? oai.choices[0] : null;
+  const m = choice0 && typeof choice0 === "object" ? choice0.message : null;
+  const oaiText = normalizeString(m?.content) || normalizeString(choice0?.text);
+  if (oaiText) return oaiText;
+
+  const types = Array.isArray(json?.content)
+    ? json.content
+        .map((b) => normalizeString(b?.type) || "unknown")
+        .filter(Boolean)
+        .slice(0, 10)
+        .join(",")
+    : "";
+  throw new Error(`Anthropic 响应缺少可解析文本（content_types=${types || "n/a"}）`.trim());
 }
 
 async function* anthropicStreamTextDeltas({ baseUrl, apiKey, model, system, messages, timeoutMs, abortSignal, extraHeaders, requestDefaults }) {

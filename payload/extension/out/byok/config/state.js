@@ -10,7 +10,10 @@ const state = {
   vscode: null,
   extensionContext: null,
   runtimeEnabled: true,
-  configManager: null
+  configManager: null,
+  lastCapturedToolDefinitions: null,
+  lastCapturedToolDefinitionsAtMs: 0,
+  lastCapturedToolDefinitionsMeta: null
 };
 
 async function setRuntimeEnabled(ctx, enabled) {
@@ -21,6 +24,24 @@ async function setRuntimeEnabled(ctx, enabled) {
   return state.runtimeEnabled;
 }
 
+function captureAugmentToolDefinitions(toolDefinitions, meta) {
+  const defs = Array.isArray(toolDefinitions) ? toolDefinitions.filter((x) => x && typeof x === "object") : [];
+  if (!defs.length) return false;
+  state.lastCapturedToolDefinitions = defs;
+  state.lastCapturedToolDefinitionsAtMs = Date.now();
+  state.lastCapturedToolDefinitionsMeta = meta && typeof meta === "object" ? meta : null;
+  return true;
+}
+
+function getLastCapturedToolDefinitions() {
+  const defs = Array.isArray(state.lastCapturedToolDefinitions) ? state.lastCapturedToolDefinitions : [];
+  return {
+    toolDefinitions: defs,
+    capturedAtMs: Number(state.lastCapturedToolDefinitionsAtMs) || 0,
+    meta: state.lastCapturedToolDefinitionsMeta && typeof state.lastCapturedToolDefinitionsMeta === "object" ? state.lastCapturedToolDefinitionsMeta : null
+  };
+}
+
 function ensureConfigManager(opts) {
   if (!state.configManager) state.configManager = createConfigManager();
   const ctx = opts && typeof opts === "object" ? opts.ctx : null;
@@ -28,4 +49,4 @@ function ensureConfigManager(opts) {
   return state.configManager;
 }
 
-module.exports = { state, setRuntimeEnabled, ensureConfigManager, CONFIG_SYNC_KEYS, RUNTIME_ENABLED_KEY };
+module.exports = { state, setRuntimeEnabled, captureAugmentToolDefinitions, getLastCapturedToolDefinitions, ensureConfigManager, CONFIG_SYNC_KEYS, RUNTIME_ENABLED_KEY };

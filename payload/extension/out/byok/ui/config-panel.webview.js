@@ -46,6 +46,7 @@
     clearOfficialToken: false,
     modal: null,
     dirty: false,
+    selfTest: { running: false, logs: [], report: null },
     sideCollapsed: persistedSideCollapsed,
     endpointSearch: persistedEndpointSearch
   };
@@ -277,7 +278,11 @@
     const msg = ev.data;
     const t = msg && typeof msg === "object" ? msg.type : "";
     if (t === "status") setUiState({ status: msg.status || "" }, { preserveEdits: true });
-    if (t === "render") setUiState({ cfg: migrateLegacyTelemetryDisabledEndpointsToRules(msg.config || {}), summary: msg.summary || {}, clearOfficialToken: false, modal: null, dirty: false }, { preserveEdits: false });
+    if (t === "render")
+      setUiState(
+        { cfg: migrateLegacyTelemetryDisabledEndpointsToRules(msg.config || {}), summary: msg.summary || {}, clearOfficialToken: false, modal: null, dirty: false },
+        { preserveEdits: false }
+      );
     if (t === "providerModelsFetched") {
       const idx = Number(msg.idx);
       const models = Array.isArray(msg.models) ? msg.models : [];
@@ -292,6 +297,32 @@
       return setUiState({ cfg, status: "Models fetched (pending save).", dirty: true }, { preserveEdits: false });
     }
     if (t === "providerModelsFailed") return setUiState({ status: msg.error || "Fetch models failed." }, { preserveEdits: true });
+    if (t === "selfTestStarted") {
+      return setUiState({ selfTest: { running: true, logs: [], report: null }, status: "Self Test started..." }, { preserveEdits: true });
+    }
+    if (t === "selfTestLog") {
+      const line = normalizeStr(msg?.line);
+      const prev = uiState.selfTest && typeof uiState.selfTest === "object" ? uiState.selfTest : { running: false, logs: [], report: null };
+      const logs = Array.isArray(prev.logs) ? prev.logs.slice() : [];
+      if (line) logs.push(line);
+      while (logs.length > 600) logs.shift();
+      return setUiState({ selfTest: { ...prev, logs } }, { preserveEdits: true });
+    }
+    if (t === "selfTestDone") {
+      const prev = uiState.selfTest && typeof uiState.selfTest === "object" ? uiState.selfTest : { running: false, logs: [], report: null };
+      return setUiState({ selfTest: { ...prev, running: false, report: msg?.report || null }, status: "Self Test finished." }, { preserveEdits: true });
+    }
+    if (t === "selfTestFailed") {
+      const prev = uiState.selfTest && typeof uiState.selfTest === "object" ? uiState.selfTest : { running: false, logs: [], report: null };
+      return setUiState(
+        { selfTest: { ...prev, running: false }, status: msg?.error ? `Self Test failed: ${msg.error}` : "Self Test failed." },
+        { preserveEdits: true }
+      );
+    }
+    if (t === "selfTestCanceled") {
+      const prev = uiState.selfTest && typeof uiState.selfTest === "object" ? uiState.selfTest : { running: false, logs: [], report: null };
+      return setUiState({ selfTest: { ...prev, running: false }, status: "Self Test canceled." }, { preserveEdits: true });
+    }
   });
 
   document.addEventListener("click", (ev) => {
@@ -313,6 +344,18 @@
       vscode.postMessage({ type: "fetchProviderModels", idx, provider: p });
       setUiState({ status: `Fetching models... (Provider #${idx + 1})` }, { preserveEdits: true });
       return;
+    }
+
+    if (action === "runSelfTest") {
+      vscode.postMessage({ type: "runSelfTest", config: gatherConfigFromDom() });
+      return setUiState({ selfTest: { running: true, logs: [], report: null }, status: "Self Test starting..." }, { preserveEdits: true });
+    }
+    if (action === "cancelSelfTest") {
+      vscode.postMessage({ type: "cancelSelfTest" });
+      return setUiState({ status: "Canceling Self Test..." }, { preserveEdits: true });
+    }
+    if (action === "clearSelfTest") {
+      return setUiState({ selfTest: { running: false, logs: [], report: null }, status: "Self Test cleared." }, { preserveEdits: true });
     }
 
     if (action === "editProviderModels") return setUiState({ modal: { kind: "models", idx: Number(btn.getAttribute("data-idx")) } }, { preserveEdits: true });

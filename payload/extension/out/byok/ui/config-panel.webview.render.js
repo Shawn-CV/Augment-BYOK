@@ -241,7 +241,7 @@
     return lines.join("");
   };
 
-  ns.renderApp = function renderApp({ cfg, summary, status, modal, dirty, sideCollapsed, endpointSearch }) {
+  ns.renderApp = function renderApp({ cfg, summary, status, modal, dirty, sideCollapsed, endpointSearch, selfTest }) {
     const c = cfg && typeof cfg === "object" ? cfg : {};
     const s = summary && typeof summary === "object" ? summary : {};
     const off = c.official && typeof c.official === "object" ? c.official : {};
@@ -261,6 +261,40 @@
     const isDirty = dirty === true;
     const isSideCollapsed = sideCollapsed === true;
     const runtimeEnabled = s.runtimeEnabled === true;
+
+    const st = selfTest && typeof selfTest === "object" ? selfTest : {};
+    const stRunning = st.running === true;
+    const stLogs = Array.isArray(st.logs) ? st.logs : [];
+    const stReport = st.report && typeof st.report === "object" ? st.report : null;
+
+    const summarizeSelfTestReport = () => {
+      if (!stReport) return "";
+      const ps = Array.isArray(stReport.providers) ? stReport.providers : [];
+      const total = ps.length;
+      const failed = ps.filter((p) => p && p.ok === false).length;
+      const globals = stReport.global && typeof stReport.global === "object" ? stReport.global : {};
+      const gTests = Array.isArray(globals.tests) ? globals.tests : [];
+      const gFailed = gTests.filter((x) => x && x.ok === false).length;
+      const badge = stReport.ok === true ? `<span class="badge">ok</span>` : `<span class="badge">failed</span>`;
+      return `<div class="small">result: ${badge} providers_failed=${failed}/${total} global_failed=${gFailed}/${gTests.length}</div>`;
+    };
+
+    const selfTestHtml = `
+      <div class="card">
+        <div class="title">Self Test</div>
+        <div class="row" style="justify-content:space-between;align-items:center;">
+          <div class="row">
+            <button class="btn primary" data-action="runSelfTest" ${stRunning ? "disabled" : ""}>Run</button>
+            <button class="btn" data-action="cancelSelfTest" ${stRunning ? "" : "disabled"}>Cancel</button>
+            <button class="btn" data-action="clearSelfTest" ${stRunning ? "disabled" : ""}>Clear</button>
+          </div>
+          ${stRunning ? `<span class="badge">running</span>` : stReport ? (stReport.ok === true ? `<span class="badge">ok</span>` : `<span class="badge">failed</span>`) : ""}
+        </div>
+        <div class="hint">覆盖：models / 非流式 / 流式 / chat-stream / 真实工具集(schema+tool_use 往返) / 官方工具真实执行(agents/run-remote-tool) / 多模态 / 上下文压缩(historySummary) / 缓存命中。</div>
+        ${summarizeSelfTestReport()}
+        <textarea class="mono" id="selfTestLog" readonly style="min-height:160px;">${escapeHtml(stLogs.join("\n"))}</textarea>
+      </div>
+    `;
 
     const toolbar = [
       `<button class="btn primary" data-action="save">Save</button>`,
@@ -433,7 +467,7 @@
         <div class="title">History Summary（上下文压缩）</div>
         <div class="hint">
           启用后会在后台自动做“滚动摘要”，用于避免上下文溢出；面板/聊天 UI 仍显示完整历史（压缩仅用于发给上游模型）。
-          高级参数使用默认值（如需可 Export 后在 JSON 里调整）。
+          高级参数使用默认值（当前面板未提供高级字段编辑）。
         </div>
         <div class="grid">
           <div>historySummary.enabled</div>
@@ -639,6 +673,7 @@
           ${providersHtml}
           ${historySummaryHtml}
           ${endpointRules}
+          ${selfTestHtml}
         </div>
         <div class="side" id="side">${ns.summarizeSummaryBox(summary)}</div>
       </div>

@@ -4,8 +4,10 @@ const { debug } = require("../infra/log");
 const { normalizeString, normalizeRawToken } = require("../infra/util");
 const { state } = require("../config/state");
 const { openAiCompleteText } = require("../providers/openai");
+const { openAiResponsesCompleteText } = require("../providers/openai-responses");
 const { anthropicCompleteText } = require("../providers/anthropic");
-const { buildSystemPrompt, buildOpenAiMessages, buildAnthropicMessages } = require("./augment-chat");
+const { geminiCompleteText } = require("../providers/gemini");
+const { buildSystemPrompt, buildOpenAiMessages, buildOpenAiResponsesInput, buildAnthropicMessages, buildGeminiContents } = require("./augment-chat");
 const shared = require("./augment-chat.shared");
 const { buildAbridgedHistoryText, exchangeRequestNodes, exchangeResponseNodes } = require("./augment-history-summary-auto.abridged");
 const { REQUEST_NODE_TOOL_RESULT, REQUEST_NODE_HISTORY_SUMMARY } = require("./augment-protocol");
@@ -277,7 +279,24 @@ function pickProviderById(cfg, providerId) {
 function normalizeProviderRequestDefaults(provider, maxTokens) {
   const base = provider && typeof provider === "object" && provider.requestDefaults && typeof provider.requestDefaults === "object" && !Array.isArray(provider.requestDefaults) ? provider.requestDefaults : {};
   const out = { ...base };
-  if (Number.isFinite(Number(maxTokens)) && Number(maxTokens) > 0) out.max_tokens = Math.floor(Number(maxTokens));
+  const type = normalizeString(provider?.type);
+  const mt = Number(maxTokens);
+  const hasMt = Number.isFinite(mt) && mt > 0;
+  if (hasMt) {
+    const n = Math.floor(mt);
+    if (type === "openai_responses") {
+      out.max_output_tokens = n;
+      if ("max_tokens" in out) delete out.max_tokens;
+      if ("maxTokens" in out) delete out.maxTokens;
+    } else if (type === "gemini_ai_studio") {
+      const gc = out.generationConfig && typeof out.generationConfig === "object" && !Array.isArray(out.generationConfig) ? out.generationConfig : {};
+      out.generationConfig = { ...gc, maxOutputTokens: n };
+      if ("max_tokens" in out) delete out.max_tokens;
+      if ("maxTokens" in out) delete out.maxTokens;
+    } else {
+      out.max_tokens = n;
+    }
+  }
   if (out.thinking) delete out.thinking;
   if (out.tools) delete out.tools;
   if (out.tool_choice) delete out.tool_choice;
@@ -321,6 +340,14 @@ async function runSummaryModelOnce({ provider, model, prompt, chatHistory, maxTo
   }
   if (type === "anthropic") {
     return await anthropicCompleteText({ baseUrl, apiKey, model, system: buildSystemPrompt(augmentReq), messages: buildAnthropicMessages(augmentReq), timeoutMs, abortSignal, extraHeaders, requestDefaults });
+  }
+  if (type === "openai_responses") {
+    const { instructions, input } = buildOpenAiResponsesInput(augmentReq);
+    return await openAiResponsesCompleteText({ baseUrl, apiKey, model, instructions, input, timeoutMs, abortSignal, extraHeaders, requestDefaults });
+  }
+  if (type === "gemini_ai_studio") {
+    const { systemInstruction, contents } = buildGeminiContents(augmentReq);
+    return await geminiCompleteText({ baseUrl, apiKey, model, systemInstruction, contents, timeoutMs, abortSignal, extraHeaders, requestDefaults });
   }
   throw new Error(`historySummary 未知 provider.type: ${type}`);
 }

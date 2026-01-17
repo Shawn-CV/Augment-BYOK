@@ -3,7 +3,7 @@
 const nodePath = require("path");
 
 const { debug, warn } = require("../infra/log");
-const { ensureConfigManager, state } = require("../config/state");
+const { ensureConfigManager, state, captureAugmentToolDefinitions } = require("../config/state");
 const { decideRoute } = require("../core/router");
 const { normalizeEndpoint, normalizeString, normalizeRawToken, safeTransform, emptyAsyncGenerator } = require("../infra/util");
 const { ensureModelRegistryFeatureFlags } = require("../core/model-registry");
@@ -408,6 +408,15 @@ async function* byokStreamText({ provider, model, system, messages, timeoutMs, a
 async function* byokChatStream({ cfg, provider, model, requestedModel, body, timeoutMs, abortSignal, upstreamCompletionURL, upstreamApiToken }) {
   const { type, baseUrl, apiKey, extraHeaders, requestDefaults } = providerRequestContext(provider);
   const req = normalizeAugmentChatRequest(body);
+  try {
+    captureAugmentToolDefinitions(req.tool_definitions, {
+      endpoint: "/chat-stream",
+      providerId: normalizeString(provider?.id),
+      providerType: type,
+      requestedModel: normalizeString(requestedModel),
+      conversationId: normalizeString(req?.conversation_id ?? req?.conversationId ?? req?.conversationID)
+    });
+  } catch {}
   const msg = normalizeString(req.message);
   const hasNodes = Array.isArray(req.nodes) && req.nodes.length;
   const hasHistory = Array.isArray(req.chat_history) && req.chat_history.length;
@@ -1068,6 +1077,15 @@ async function maybeHandleCallApi({ endpoint, body, transform, timeoutMs, abortS
   if (ep === "/chat") {
     const { type, baseUrl, apiKey, extraHeaders, requestDefaults } = providerRequestContext(route.provider);
     const req = normalizeAugmentChatRequest(body);
+    try {
+      captureAugmentToolDefinitions(req.tool_definitions, {
+        endpoint: "/chat",
+        providerId: normalizeString(route?.provider?.id),
+        providerType: type,
+        requestedModel: normalizeString(route?.requestedModel),
+        conversationId: normalizeString(req?.conversation_id ?? req?.conversationId ?? req?.conversationID)
+      });
+    } catch {}
     const msg = normalizeString(req.message);
     const hasNodes = Array.isArray(req.nodes) && req.nodes.length;
     const hasHistory = Array.isArray(req.chat_history) && req.chat_history.length;
@@ -1087,6 +1105,16 @@ async function maybeHandleCallApi({ endpoint, body, transform, timeoutMs, abortS
     }
     if (type === "anthropic") {
       const text = await anthropicCompleteText({ baseUrl, apiKey, model: route.model, system: buildSystemPrompt(req), messages: buildAnthropicMessages(req), timeoutMs: t, abortSignal, extraHeaders, requestDefaults });
+      return safeTransform(transform, makeBackChatResult(text, { nodes: [] }), ep);
+    }
+    if (type === "openai_responses") {
+      const { instructions, input } = buildOpenAiResponsesInput(req);
+      const text = await openAiResponsesCompleteText({ baseUrl, apiKey, model: route.model, instructions, input, timeoutMs: t, abortSignal, extraHeaders, requestDefaults });
+      return safeTransform(transform, makeBackChatResult(text, { nodes: [] }), ep);
+    }
+    if (type === "gemini_ai_studio") {
+      const { systemInstruction, contents } = buildGeminiContents(req);
+      const text = await geminiCompleteText({ baseUrl, apiKey, model: route.model, systemInstruction, contents, timeoutMs: t, abortSignal, extraHeaders, requestDefaults });
       return safeTransform(transform, makeBackChatResult(text, { nodes: [] }), ep);
     }
     throw new Error(`未知 provider.type: ${type}`);

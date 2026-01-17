@@ -5,6 +5,7 @@ const { normalizeString } = require("../infra/util");
 const { defaultConfig } = require("../config/config");
 const { setRuntimeEnabled: setRuntimeEnabledPersisted } = require("../config/state");
 const { clearHistorySummaryCacheAll } = require("../core/augment-history-summary-auto");
+const { runSelfTest } = require("../core/self-test");
 const { fetchProviderModels } = require("../providers/models");
 const { renderConfigPanelHtml } = require("./config-panel.html");
 
@@ -55,6 +56,9 @@ function postRender(panel, cfgMgr, state) {
 }
 
 function createHandlers({ vscode, ctx, cfgMgr, state, panel }) {
+  let selfTestController = null;
+  let selfTestRunning = false;
+
   return {
     init: async () => {
       postRender(panel, cfgMgr, state);
@@ -120,6 +124,56 @@ function createHandlers({ vscode, ctx, cfgMgr, state, panel }) {
         const m = err instanceof Error ? err.message : String(err);
         warn("fetchProviderModels failed:", m);
         post(panel, { type: "providerModelsFailed", idx, error: `Fetch models failed: ${m}` });
+      }
+    },
+    cancelSelfTest: async () => {
+      if (!selfTestRunning || !selfTestController) {
+        postStatus(panel, "Self Test not running.");
+        return;
+      }
+      try {
+        selfTestController.abort(new Error("Self Test canceled by user"));
+      } catch {}
+      postStatus(panel, "Self Test canceled.");
+    },
+    runSelfTest: async (msg) => {
+      if (selfTestRunning) {
+        postStatus(panel, "Self Test already running.");
+        return;
+      }
+      const cfg = msg && typeof msg === "object" && msg.config && typeof msg.config === "object" ? msg.config : cfgMgr.get();
+      const timeoutMs = Number.isFinite(Number(cfg?.timeouts?.upstreamMs)) && Number(cfg.timeouts.upstreamMs) > 0 ? Number(cfg.timeouts.upstreamMs) : 120000;
+
+      selfTestRunning = true;
+      selfTestController = new AbortController();
+      post(panel, { type: "selfTestStarted", startedAtMs: Date.now() });
+      postStatus(panel, "Self Test started...");
+
+      try {
+        await runSelfTest({
+          cfg,
+          timeoutMs: Math.min(60000, timeoutMs),
+          abortSignal: selfTestController.signal,
+          onEvent: (ev) => {
+            const t = normalizeString(ev?.type);
+            if (t === "log") post(panel, { type: "selfTestLog", line: String(ev?.line || "") });
+            else if (t === "done") post(panel, { type: "selfTestDone", report: ev?.report || null });
+          }
+        });
+        postStatus(panel, "Self Test finished.");
+      } catch (err) {
+        if (err && typeof err === "object" && err.name === "AbortError") {
+          post(panel, { type: "selfTestCanceled" });
+          postStatus(panel, "Self Test canceled.");
+          return;
+        }
+        const m = err instanceof Error ? err.message : String(err);
+        warn("selfTest failed:", m);
+        post(panel, { type: "selfTestFailed", error: m });
+        postStatus(panel, `Self Test failed: ${m}`);
+      } finally {
+        selfTestRunning = false;
+        selfTestController = null;
       }
     }
   };

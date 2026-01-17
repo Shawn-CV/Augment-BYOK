@@ -40,16 +40,61 @@ function buildOpenAiResponsesRequest({ baseUrl, apiKey, model, instructions, inp
 
 async function openAiResponsesCompleteText({ baseUrl, apiKey, model, instructions, input, timeoutMs, abortSignal, extraHeaders, requestDefaults }) {
   const { url, headers, body } = buildOpenAiResponsesRequest({ baseUrl, apiKey, model, instructions, input, tools: [], extraHeaders, requestDefaults, stream: false });
-  const resp = await safeFetch(
-    url,
-    { method: "POST", headers, body: JSON.stringify(body) },
-    { timeoutMs, abortSignal, label: "OpenAI(responses)" }
-  );
+  const resp = await safeFetch(url, { method: "POST", headers, body: JSON.stringify(body) }, { timeoutMs, abortSignal, label: "OpenAI(responses)" });
   if (!resp.ok) throw new Error(`OpenAI(responses) ${resp.status}: ${await readTextLimit(resp, 500)}`.trim());
+
   const json = await resp.json().catch(() => null);
-  const text = normalizeString(json?.output_text ?? json?.outputText);
-  if (!text) throw new Error("OpenAI(responses) 响应缺少 output_text");
-  return text;
+  const direct = normalizeString(json?.output_text ?? json?.outputText ?? json?.text);
+  if (direct) return direct;
+
+  const output = Array.isArray(json?.output) ? json.output : [];
+  const parts = [];
+  for (const it of output) {
+    if (!it || typeof it !== "object") continue;
+    if (it.type === "message" && it.role === "assistant") {
+      const content = it.content;
+      if (typeof content === "string" && content.trim()) {
+        parts.push(content);
+        continue;
+      }
+      const blocks = Array.isArray(content) ? content : [];
+      for (const b of blocks) {
+        if (!b || typeof b !== "object") continue;
+        if ((b.type === "output_text" || b.type === "text") && typeof b.text === "string" && b.text) parts.push(b.text);
+      }
+      continue;
+    }
+    if ((it.type === "output_text" || it.type === "text") && typeof it.text === "string" && it.text) {
+      parts.push(it.text);
+      continue;
+    }
+  }
+  const joined = parts.join("").trim();
+  if (joined) return joined;
+
+  const hasToolCall = output.some((it) => it && typeof it === "object" && it.type === "function_call");
+  if (hasToolCall) throw new Error("OpenAI(responses) 返回 function_call（当前调用不执行工具；请改用 /chat-stream）");
+
+  // 兼容：部分 /responses 网关只支持 SSE（即使 stream=false 也可能返回非 JSON/空 JSON）。
+  // 这里做一次“流式兜底”以提升 openai_responses provider 的鲁棒性。
+  try {
+    let out = "";
+    for await (const d of openAiResponsesStreamTextDeltas({ baseUrl, apiKey, model, instructions, input, timeoutMs, abortSignal, extraHeaders, requestDefaults })) {
+      if (typeof d === "string") out += d;
+    }
+    const s = normalizeString(out);
+    if (s) return s;
+  } catch (err) {
+    const fallbackMsg = err instanceof Error ? err.message : String(err);
+    throw new Error(`OpenAI(responses) 响应缺少可解析文本（且 stream fallback 失败: ${fallbackMsg}）`.trim());
+  }
+
+  const types = output
+    .map((it) => (it && typeof it === "object" ? normalizeString(it.type) || "unknown" : "unknown"))
+    .filter(Boolean)
+    .slice(0, 12)
+    .join(",");
+  throw new Error(`OpenAI(responses) 响应缺少可解析文本（output_types=${types || "n/a"}）`.trim());
 }
 
 async function* openAiResponsesStreamTextDeltas({ baseUrl, apiKey, model, instructions, input, timeoutMs, abortSignal, extraHeaders, requestDefaults }) {
