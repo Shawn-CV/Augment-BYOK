@@ -109,9 +109,6 @@ function defaultConfig() {
         "/resolve-edit": { mode: "disabled" },
         "/resolve-instruction": { mode: "disabled" }
       }
-    },
-    telemetry: {
-      disabledEndpoints: []
     }
   };
 }
@@ -154,7 +151,7 @@ function normalizeConfig(raw) {
 
   const telemetry = get(raw, ["telemetry"]);
   const disabledEndpoints = get(telemetry, ["disabled_endpoints", "disabledEndpoints"]);
-  if (Array.isArray(disabledEndpoints)) out.telemetry.disabledEndpoints = disabledEndpoints.map(normalizeEndpoint).filter(Boolean);
+  const legacyTelemetryDisabledEndpoints = Array.isArray(disabledEndpoints) ? disabledEndpoints.map(normalizeEndpoint).filter(Boolean) : [];
 
   const historySummary = get(raw, ["history_summary", "historySummary"]);
   if (historySummary && typeof historySummary === "object" && !Array.isArray(historySummary)) {
@@ -240,6 +237,20 @@ function normalizeConfig(raw) {
       const providerId = normalizeString(get(v, ["provider_id", "providerId"]));
       const model = normalizeString(get(v, ["model"]));
       out.routing.rules[ep] = { mode, providerId, model };
+    }
+  }
+
+  // legacy: telemetry.disabledEndpoints（已弃用）→ routing.rules[*].mode=disabled
+  // 需要覆盖 rules 中显式设置，以保持旧语义（telemetry 优先级更高）。
+  if (legacyTelemetryDisabledEndpoints.length) {
+    out.routing = out.routing && typeof out.routing === "object" ? out.routing : {};
+    out.routing.rules = out.routing.rules && typeof out.routing.rules === "object" ? out.routing.rules : {};
+    for (const ep of legacyTelemetryDisabledEndpoints) {
+      if (!ep) continue;
+      const r = out.routing.rules[ep] && typeof out.routing.rules[ep] === "object" ? out.routing.rules[ep] : (out.routing.rules[ep] = {});
+      r.mode = "disabled";
+      r.providerId = "";
+      r.model = "";
     }
   }
 

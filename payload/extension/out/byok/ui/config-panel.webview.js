@@ -56,7 +56,7 @@
   const persistedSideCollapsed = persisted && typeof persisted === "object" ? Boolean(persisted.sideCollapsed) : false;
   const persistedEndpointSearch =
     persisted && typeof persisted === "object"
-      ? normalizeStr(persisted.endpointSearch) || normalizeStr(persisted.telemetrySearch) || normalizeStr(persisted.routingAddSearch)
+      ? normalizeStr(persisted.endpointSearch) || normalizeStr(persisted.routingAddSearch)
       : "";
   const persistedProviderExpanded =
     persisted && typeof persisted === "object" && persisted.providerExpanded && typeof persisted.providerExpanded === "object" && !Array.isArray(persisted.providerExpanded)
@@ -325,34 +325,10 @@
           }
         }
 
-        cfg.telemetry = cfg.telemetry && typeof cfg.telemetry === "object" ? cfg.telemetry : {};
-        cfg.telemetry.disabledEndpoints = [];
-
         return cfg;
       },
       { thresholdMs: 16 }
     );
-  }
-
-  function migrateLegacyTelemetryDisabledEndpointsToRules(cfg) {
-    const c = cfg && typeof cfg === "object" ? cfg : {};
-    const out = JSON.parse(JSON.stringify(c));
-    const disabled = Array.isArray(out?.telemetry?.disabledEndpoints) ? out.telemetry.disabledEndpoints : [];
-    if (disabled.length) {
-      out.routing = out.routing && typeof out.routing === "object" ? out.routing : {};
-      out.routing.rules = out.routing.rules && typeof out.routing.rules === "object" ? out.routing.rules : {};
-      for (const epRaw of disabled) {
-        const ep = normalizeStr(epRaw);
-        if (!ep) continue;
-        const r = out.routing.rules[ep] && typeof out.routing.rules[ep] === "object" ? out.routing.rules[ep] : (out.routing.rules[ep] = {});
-        r.mode = "disabled";
-        r.providerId = "";
-        r.model = "";
-      }
-    }
-    out.telemetry = out.telemetry && typeof out.telemetry === "object" ? out.telemetry : {};
-    out.telemetry.disabledEndpoints = [];
-    return out;
   }
 
   function setUiState(patch, { preserveEdits = true } = {}) {
@@ -377,7 +353,7 @@
 
     if (t === "render") {
       setUiState(
-        { cfg: migrateLegacyTelemetryDisabledEndpointsToRules(msg.config || {}), summary: msg.summary || {}, clearOfficialToken: false, modal: null, dirty: false },
+        { cfg: msg.config || {}, summary: msg.summary || {}, clearOfficialToken: false, modal: null, dirty: false },
         { preserveEdits: false }
       );
       return;
