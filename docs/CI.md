@@ -12,6 +12,8 @@
 
 备注：
 - GitHub Release assets 不能同时存在两个同名文件；因此 `build-release` 上传到 Release 时，会把 `dist/upstream.lock.json` 复制为 `dist.upstream.lock.json`（仅用于 Release 资产命名去重）。
+- `upstream-check` 需要创建 PR 时：请在仓库 `Settings -> Actions -> General -> Workflow permissions` 中开启 `Read and write permissions`，并勾选 `Allow GitHub Actions to create and approve pull requests`；否则会报 `GitHub Actions is not permitted to create or approve pull requests.`。
+- 若组织策略禁止开启上述选项，可创建 fine-grained PAT（至少 `Contents: Read and write` + `Pull requests: Read and write`），保存为仓库 Secret `UPSTREAM_PR_TOKEN`，workflow 会自动优先使用该 token 来创建 PR。
 
 fail-fast（直接阻断构建）：
 - patch needle 缺失（避免 silent break）

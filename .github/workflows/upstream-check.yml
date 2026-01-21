@@ -58,6 +58,8 @@ jobs:
         if: always()
         uses: peter-evans/create-pull-request@v6
         with:
+          # Prefer a dedicated PAT (fine-grained) when repo/org blocks PR creation via GITHUB_TOKEN.
+          token: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
           commit-message: "chore: bump upstream"
           title: "chore: bump upstream"
           body: |
